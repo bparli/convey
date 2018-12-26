@@ -126,6 +126,8 @@ fn run_server(lb: Proxy, sender: Sender<StatsMssg>) -> Result<(), Box<std::error
     debug!("Proxying to: {:?}", lb.backend);
     match TcpListener::bind(&lb.listen_addr) {
         Ok(socket) => {
+
+            // schedule health checker
             let back = lb.backend.clone();
             let time = back.health_check_interval;
             let timer_sender = sender.clone();
@@ -153,7 +155,7 @@ fn run_server(lb: Proxy, sender: Sender<StatsMssg>) -> Result<(), Box<std::error
                                         connections: 1,
                                         bytes_tx: 0,
                                         bytes_rx: 0,
-                                        healthy: None};
+                                        servers: None};
                     match sender.send(mssg) {
                         Ok(_) => {},
                         Err(e) => error!("Error sending stats message on channel: {}", e)
@@ -195,7 +197,7 @@ fn run_server(lb: Proxy, sender: Sender<StatsMssg>) -> Result<(), Box<std::error
                                         connections: -1,
                                         bytes_tx: from_client,
                                         bytes_rx: from_server,
-                                        healthy: None};
+                                        servers: None};
                         match thread_sender.send(mssg) {
                             Ok(_) => {},
                             Err(e) => error!("Error sending stats message on channel: {}", e)

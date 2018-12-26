@@ -138,30 +138,41 @@ fn tcp_health_check(server: SocketAddr) -> bool {
 }
 
 pub fn health_checker(backend: Arc<Backend>, sender: &Sender<StatsMssg>) {
-    let mut updates = HashMap::new();
+    let mut backend_status = HashMap::new();
+    let mut update = false;
     {
         let srvs = backend.servers.read().unwrap();
         for (server, status) in srvs.servers_map.iter() {
             let res = tcp_health_check(*server);
             if res != status.healthy {
                 debug!("Server {} status has changed from {} to {}.  Updating stats and backend", server, status.healthy, res);
-                updates.insert(server.clone(), res);
+                update = true;
             }
+            backend_status.insert(server.clone(), res);
         }
     }
-    if updates.len() > 0 {
-        backend.update_backends_health(&updates);
-        for (_, healthy) in updates {
-            let mssg = StatsMssg{frontend: None,
-                                backend: backend.name.clone(),
-                                connections: 0,
-                                bytes_tx: 0,
-                                bytes_rx: 0,
-                                healthy: Some(healthy)};
-            match sender.send(mssg) {
-                Ok(_) => {},
-                Err(e) => error!("Error sending stats message on channel: {}", e)
-            }
-        }
+
+    // update_backends_health uses the write lock so only call it when absolutely necessary
+    if update {
+        backend.update_backends_health(&backend_status);
+    }
+
+    send_status(backend.name.clone(), backend_status, sender);
+}
+
+fn send_status(name: String, updates: HashMap<SocketAddr, bool>, sender: &Sender<StatsMssg>) {
+    let mut servers = HashMap::new();
+    for (srv, healthy) in updates {
+        servers.insert(srv.to_string(), healthy);
+    }
+    let mssg = StatsMssg{frontend: None,
+                        backend: name.clone(),
+                        connections: 0,
+                        bytes_tx: 0,
+                        bytes_rx: 0,
+                        servers: Some(servers)};
+    match sender.send(mssg) {
+        Ok(_) => {},
+        Err(e) => error!("Error sending stats message on channel: {}", e)
     }
 }

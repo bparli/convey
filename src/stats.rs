@@ -8,7 +8,8 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use crate::config::BaseConfig;
 use std::sync::mpsc::{channel, Sender, Receiver};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 
 pub struct StatsMssg {
     pub frontend: Option<String>,
@@ -16,7 +17,7 @@ pub struct StatsMssg {
     pub connections: i32,
     pub bytes_tx: u64,
     pub bytes_rx: u64,
-    pub healthy: Option<bool>,
+    pub servers: Option<HashMap<String, bool>>,
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -30,8 +31,8 @@ struct Stats {
     current_connections: i32,
     total_bytes_tx: u64,
     total_bytes_rx: u64,
-    backends: BTreeMap<String, BackendStats>,
-    frontends: BTreeMap<String, FrontendStats>,
+    backends: HashMap<String, BackendStats>,
+    frontends: HashMap<String, FrontendStats>,
 }
 
 #[derive(Serialize)]
@@ -40,7 +41,7 @@ struct BackendStats {
     current_connections: i32,
     bytes_tx: u64,
     bytes_rx: u64,
-    healthy: bool,
+    servers: HashMap<String, bool>,
 }
 
 #[derive(Serialize)]
@@ -61,8 +62,8 @@ impl Handler for StatsApi {
 
 pub fn run(lb_config: &BaseConfig) -> Sender<StatsMssg> {
     let (sender, receiver): (Sender<StatsMssg>, Receiver<StatsMssg>) = channel();
-    let mut frontends = BTreeMap::new();
-    let mut backends = BTreeMap::new();
+    let mut frontends = HashMap::new();
+    let mut backends = HashMap::new();
     for (name, _) in &lb_config.frontends {
         let front = FrontendStats {
             total_connections: 0,
@@ -78,7 +79,7 @@ pub fn run(lb_config: &BaseConfig) -> Sender<StatsMssg> {
             current_connections: 0,
             bytes_rx: 0,
             bytes_tx: 0,
-            healthy: false,
+            servers: HashMap::new(),
         };
         backends.insert(name.clone(), back);
     }
@@ -126,8 +127,8 @@ pub fn run(lb_config: &BaseConfig) -> Sender<StatsMssg> {
                         backend_stats.bytes_rx = backend_stats.bytes_rx + mssg.bytes_rx;
                         backend_stats.bytes_tx = backend_stats.bytes_tx + mssg.bytes_tx;
 
-                        if let Some(healthy) = &mssg.healthy {
-                            backend_stats.healthy = *healthy;
+                        if let Some(servers) = mssg.servers {
+                            backend_stats.servers = servers;
                         }
                     }
 
