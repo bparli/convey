@@ -4,13 +4,9 @@ use std::io::{Read, Error as IOError};
 use std::result::Result;
 use std::sync::mpsc::{Receiver};
 use std::thread;
-
-extern crate notify;
-
 use notify::{RecommendedWatcher, Watcher, RecursiveMode};
 use std::sync::mpsc::channel;
 use std::time::Duration;
-
 use toml;
 
 #[derive(Debug, Clone)]
@@ -129,5 +125,51 @@ impl From<toml::de::Error> for ReadError {
 impl From<Vec<toml::de::Error>> for ReadError {
     fn from(e: Vec<toml::de::Error>) -> ReadError {
         ReadError::ParseError(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::OpenOptions;
+    use std::io::prelude::*;
+    use std::{thread, time};
+
+    #[test]
+    fn test_new_config() {
+        match Config::new("testdata/test.toml") {
+            Ok(config) => {
+                assert!(config.filename == "testdata/test.toml".to_string());
+                let test_front = config.base.frontends.get("tcp_3000").unwrap();
+                assert!(test_front.listen_addr ==  "0.0.0.0:3000".to_string());
+            }
+            Err(_) => assert!(false),
+        }
+
+        assert!(Config::new("testdata/bad.toml").is_err(), "Config file is not valid");
+    }
+
+    #[test]
+    fn test_subscribe() {
+        let conf = Config::new("testdata/test.toml").unwrap();
+        let rx = conf.subscribe();
+
+        {
+            let mut f = OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open("testdata/test.toml")
+                    .unwrap();
+            f.write_all(b"\n").unwrap();
+            f.sync_data().unwrap();
+        }
+
+        let three_secs = time::Duration::from_secs(3);
+        thread::sleep(three_secs);
+
+        match rx.try_recv() {
+            Ok(_) => assert!(true),
+            Err(_) => assert!(false),
+        }
     }
 }

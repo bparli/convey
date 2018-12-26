@@ -25,7 +25,7 @@ pub struct StatsApi {
     stats: Arc<RwLock<Stats>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Stats {
     total_connections: i32,
     current_connections: i32,
@@ -35,7 +35,7 @@ struct Stats {
     frontends: HashMap<String, FrontendStats>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct BackendStats {
     total_connections: i32,
     current_connections: i32,
@@ -44,7 +44,7 @@ struct BackendStats {
     servers: HashMap<String, bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct FrontendStats {
     total_connections: i32,
     current_connections: i32,
@@ -150,4 +150,47 @@ pub fn run(lb_config: &BaseConfig) -> Sender<StatsMssg> {
         }
     });
     sender
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stats;
+    use crate::config::{Config};
+    use restson::{RestClient, RestPath, Error};
+
+    impl RestPath<()> for Stats {
+    fn get_path(_: ()) -> Result<String, Error> {
+        Ok(String::from("stats"))
+        }
+    }
+
+    #[test]
+    fn test_stats() {
+        let conf = Config::new("testdata/test.toml").unwrap();
+        let tx = stats::run(&conf.base);
+        let mut client = RestClient::new("http://127.0.0.1:7000").unwrap();
+        let data: Stats = client.get(()).unwrap();
+
+        assert_eq!(data.total_connections, 0);
+        let test_bck = data.backends.get("tcp3000_out").unwrap();
+        assert_eq!(test_bck.current_connections, 0);
+
+        let test_mssg = StatsMssg{
+            frontend: None,
+            backend: "tcp3000_out".to_string(),
+            connections: 1,
+            bytes_tx: 1000,
+            bytes_rx: 1000,
+            servers: None,
+        };
+        tx.send(test_mssg).unwrap();
+
+        let data: Stats = client.get(()).unwrap();
+
+        assert_eq!(data.total_connections, 1);
+        let test_bck = data.backends.get("tcp3000_out").unwrap();
+        assert_eq!(test_bck.current_connections, 1);
+        assert_eq!(test_bck.bytes_tx, 1000);
+    }
 }

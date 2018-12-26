@@ -1,0 +1,40 @@
+[frontends.tcp_3000]
+listen_addr = "0.0.0.0:3000"
+backend = "tcp3000_out"
+
+[frontends.tcp_3001]
+listen_addr = "0.0.0.0:3001"
+backend = "tcp3001_out"
+
+[backends.tcp3000_out]
+  health_check_interval = 3
+  [backends.tcp3000_out.servers]
+    [backends.tcp3000_out.servers.server1]
+    addr = "127.0.0.1:8080"
+    weight = 10
+    [backends.tcp3000_out.servers.server2]
+    addr = "127.0.0.1:8081"
+    weight = 1
+    [backends.tcp3000_out.servers.server3]
+    addr = "127.0.0.1:8082"
+    [backends.tcp3000_out.servers.server4]
+    addr = "127.0.0.1:8085"
+    weight = 10
+
+[backends.tcp3001_out]
+  health_check_interval = 3
+  [backends.tcp3001_out.servers]
+    [backends.tcp3001_out.servers.server1]
+    addr = "127.0.0.1:8080"
+    weight = 2
+    [backends.tcp3001_out.servers.server2]
+    addr = "127.0.0.1:8081"
+    weight = 1
+    [backends.tcp3001_out.servers.server3]
+    addr = "127.0.0.1:8082"
+
+[stats]
+port = "7000"
+
+
+

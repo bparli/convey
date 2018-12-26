@@ -1,0 +1,13 @@
+[frontends.tcp_3000]
+listen_addr = "0.0.0.0:3000"
+backend = "missing"
+
+[backends.tcp3000_out]
+  health_check_interval = 3
+  [backends.whoops.servers]
+    [backends.tcp3000_out.servers.server1]
+    addr = "127.0.0.1:8080"
+    weight = 10
+
+[stats]
+port = "7000"
