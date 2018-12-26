@@ -15,17 +15,17 @@ use self::config::Config;
 
 
 const USAGE: &'static str = "
-Convoy.
+Convey.
 
 Usage:
-  convoy
-  convoy --config=<config_file>
-  convoy (-h | --help)
-  convoy (-v | --version)
+  convey
+  convey --config=<config_file>
+  convey (-h | --help)
+  convey (-v | --version)
 
 Options:
   -h, --help               Show this screen.
-  --config=<config_file>   Config file location [default convoy.toml].
+  --config=<config_file>   Config file location [default config.toml].
   -v, --version            Show version.
 ";
 
