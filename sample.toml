@@ -11,7 +11,7 @@ backend = "tcp3001_out"
   [backends.tcp3000_out.servers]
     [backends.tcp3000_out.servers.server1]
     addr = "127.0.0.1:8080"
-    weight = 1
+    weight = 10
     [backends.tcp3000_out.servers.server2]
     addr = "127.0.0.1:8081"
     weight = 1
