@@ -15,7 +15,7 @@ use self::config::Config;
 
 
 const USAGE: &'static str = "
-Convey.
+Convey 0.1.0
 
 Usage:
   convey
