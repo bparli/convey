@@ -96,7 +96,7 @@ impl Server {
                             let new_server_pool = ServerPool::new_servers(backend_servers);
                             for proxy in proxies.iter() {
                                 if proxy.backend.name == backend_name {
-                                    debug!("Updating backend {} with {:?}", backend_name, new_server_pool);
+                                    info!("Updating backend {} with {:?}", backend_name, new_server_pool);
                                     *proxy.backend.servers.write().unwrap() = new_server_pool.clone();
                                 }
                             }

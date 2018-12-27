@@ -146,7 +146,7 @@ pub fn health_checker(backend: Arc<Backend>, sender: &Sender<StatsMssg>) {
         for (server, status) in srvs.servers_map.iter() {
             let res = tcp_health_check(*server);
             if res != status.healthy {
-                debug!("Server {} status has changed from {} to {}.  Updating stats and backend", server, status.healthy, res);
+                info!("Server {} status has changed from {} to {}.  Updating stats and backend", server, status.healthy, res);
                 update = true;
             }
             backend_status.insert(server.clone(), res);
