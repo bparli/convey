@@ -248,3 +248,94 @@ impl AsyncWrite for MyTcpStream {
         Ok(().into())
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    extern crate hyper;
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::thread;
+    use crate::config::{Config};
+    use crate::proxy;
+    use hyper::{Body, Request, Response, Server};
+    use hyper::service::service_fn_ok;
+    use hyper::rt::{self, Future};
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::{time};
+
+    fn update_config(filename: &str, word_from: String, word_to: String) {
+        let mut src = File::open(&filename).unwrap();
+        let mut data = String::new();
+        src.read_to_string(&mut data).unwrap();
+        drop(src);  // Close the file early
+
+        // Run the replace operation in memory
+        let new_data = data.replace(&*word_from, &*word_to);
+
+        // Recreate the file and dump the processed contents to it
+        let mut dst = File::create(&filename).unwrap();
+        dst.write(new_data.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn test_proxy() {
+        thread::spawn( ||{
+            let addr = ([127, 0, 0, 1], 8080).into();
+            let server = Server::bind(&addr)
+            .serve(|| {
+                service_fn_ok(move |_: Request<Body>| {
+                    Response::new(Body::from("Success DummyA Server"))
+                })
+            })
+            .map_err(|e| eprintln!("server error: {}", e));
+            rt::run(server);
+        });
+
+        thread::spawn( ||{
+            let addr = ([127, 0, 0, 1], 8081).into();
+            let server = Server::bind(&addr)
+            .serve(|| {
+                service_fn_ok(move |_: Request<Body>| {
+                    Response::new(Body::from("Success DummyB Server"))
+                })
+            })
+            .map_err(|e| eprintln!("server error: {}", e));
+            rt::run(server);
+        });
+
+        let conf = Config::new("testdata/proxy_test.toml").unwrap();
+        let lb = proxy::Server::new(conf);
+
+        //TODO: verify messages sent over channel to stats endpoint from proxy
+        let (tx, _) = channel();
+
+        let tx = tx.clone();
+        thread::spawn( ||{
+            lb.run(tx);
+        });
+
+        // validate weighted scheduling
+        for _ in 0..10 {
+            let mut resp = reqwest::get("http://127.0.0.1:3000").unwrap();
+            assert_eq!(resp.status(), 200);
+            assert!(resp.text().unwrap().contains("DummyA"));
+        }
+
+        // update config to take DummyA out of service
+        update_config("testdata/proxy_test.toml", "weight = 10000".to_string(), "weight = 0".to_string());
+        let two_secs = time::Duration::from_secs(2);
+        thread::sleep(two_secs);
+
+        // validate only DummyB is serving requests now that DummyA has been taken out of service (weight set to 0)
+        for _ in 0..10 {
+            let mut resp = reqwest::get("http://127.0.0.1:3000").unwrap();
+            assert_eq!(resp.status(), 200);
+            assert!(resp.text().unwrap().contains("DummyB"));
+        }
+
+        // reset fixture
+        update_config("testdata/proxy_test.toml", "weight = 0".to_string(), "weight = 10000".to_string());
+    }
+}

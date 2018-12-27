@@ -9,7 +9,6 @@ use std::thread;
 use crate::config::BaseConfig;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 pub struct StatsMssg {
     pub frontend: Option<String>,
