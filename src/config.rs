@@ -87,7 +87,7 @@ impl Config {
                                             Err(e) => error!("Unable to re-load new configuration {:?}", e),
                                         }
                                     }
-                                    Err(e) => println!("watch error: {:?}", e),
+                                    Err(e) => error!("watch error: {:?}", e),
                                 }
                             }
                         }
@@ -153,6 +153,9 @@ mod tests {
     fn test_subscribe() {
         let conf = Config::new("testdata/test.toml").unwrap();
         let rx = conf.subscribe();
+
+        let one_secs = time::Duration::from_secs(1);
+        thread::sleep(one_secs);
 
         {
             let mut f = OpenOptions::new()

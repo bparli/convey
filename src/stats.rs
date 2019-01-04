@@ -168,7 +168,7 @@ mod tests {
     fn test_stats() {
         let conf = Config::new("testdata/test.toml").unwrap();
         let tx = stats::run(&conf.base);
-        let mut client = RestClient::new("http://127.0.0.1:7000").unwrap();
+        let mut client = RestClient::new("http://127.0.0.1:7000/stats").unwrap();
         let data: Stats = client.get(()).unwrap();
 
         assert_eq!(data.total_connections, 0);

@@ -6,16 +6,15 @@ extern crate toml;
 extern crate serde_derive;
 
 mod config;
-mod proxy;
-mod backend;
 mod stats;
+mod proxy;
 
 use docopt::Docopt;
 use self::config::Config;
 
 
 const USAGE: &'static str = "
-Convey 0.1.0
+Convey 0.1.1
 
 Usage:
   convey
