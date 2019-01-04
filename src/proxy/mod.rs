@@ -14,7 +14,9 @@ use std::sync::mpsc::{Sender, Receiver};
 use std::collections::HashMap;
 use std::thread;
 
-use crate::backend::{Backend, ServerPool, health_checker, get_next};
+mod backend;
+
+use self::backend::{Backend, ServerPool, health_checker, get_next};
 use crate::config::{Config, BaseConfig};
 use crate::stats::StatsMssg;
 
@@ -253,7 +255,6 @@ impl AsyncWrite for MyTcpStream {
 #[cfg(test)]
 mod tests {
     extern crate hyper;
-    use super::*;
     use std::sync::mpsc::channel;
     use std::thread;
     use crate::config::{Config};
@@ -316,6 +317,9 @@ mod tests {
             lb.run(tx);
         });
 
+        let two_secs = time::Duration::from_secs(2);
+        thread::sleep(two_secs);
+
         // validate weighted scheduling
         for _ in 0..10 {
             let mut resp = reqwest::get("http://127.0.0.1:3000").unwrap();
@@ -325,7 +329,6 @@ mod tests {
 
         // update config to take DummyA out of service
         update_config("testdata/proxy_test.toml", "weight = 10000".to_string(), "weight = 0".to_string());
-        let two_secs = time::Duration::from_secs(2);
         thread::sleep(two_secs);
 
         // validate only DummyB is serving requests now that DummyA has been taken out of service (weight set to 0)

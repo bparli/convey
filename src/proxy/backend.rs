@@ -185,21 +185,24 @@ mod tests {
     use std::sync::mpsc::channel;
     use std::str::FromStr;
     use std::net::TcpListener;
-    use std::thread;
+    use std::{thread, time};
 
     #[test]
     fn test_new_servers() {
         thread::spawn( ||{
-            let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+            let listener = TcpListener::bind("127.0.0.1:8070").unwrap();
             match listener.accept() {
                 Ok((_socket, _addr)) => {},
                 Err(_e) => {},
             }
         });
 
+        let one_sec = time::Duration::from_secs(1);
+        thread::sleep(one_sec);
+
         let mut test_servers = HashMap::new();
-        test_servers.insert(FromStr::from_str("127.0.0.1:8080").unwrap(), None);
-        test_servers.insert(FromStr::from_str("127.0.0.1:8081").unwrap(), Some(100));
+        test_servers.insert(FromStr::from_str("127.0.0.1:8070").unwrap(), None);
+        test_servers.insert(FromStr::from_str("127.0.0.1:8071").unwrap(), Some(100));
 
         let test_pool = ServerPool::new_servers(test_servers);
 
@@ -209,7 +212,7 @@ mod tests {
         assert!(test_pool.weights.contains(&test_weight));
         assert_eq!(test_pool.weights.len(), 2);
 
-        let test_srv = test_pool.servers_map.get(&FromStr::from_str("127.0.0.1:8081").unwrap()).unwrap();
+        let test_srv = test_pool.servers_map.get(&FromStr::from_str("127.0.0.1:8071").unwrap()).unwrap();
         assert_eq!(test_srv.healthy, false);
         assert_eq!(test_srv.weight, 100);
     }
@@ -217,22 +220,25 @@ mod tests {
     #[test]
     fn test_backend() {
         thread::spawn( ||{
-            let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+            let listener = TcpListener::bind("127.0.0.1:8090").unwrap();
             match listener.accept() {
                 Ok((_socket, _addr)) => {},
                 Err(_e) => {},
             }
         });
 
+        let one_sec = time::Duration::from_secs(1);
+        thread::sleep(one_sec);
+
         let mut test_servers = HashMap::new();
-        test_servers.insert(FromStr::from_str("127.0.0.1:8080").unwrap(), None);
-        test_servers.insert(FromStr::from_str("127.0.0.1:8081").unwrap(), Some(100));
+        test_servers.insert(FromStr::from_str("127.0.0.1:8090").unwrap(), None);
+        test_servers.insert(FromStr::from_str("127.0.0.1:8091").unwrap(), Some(100));
 
         let test_bck = Backend::new("test".to_string(), test_servers, 1000);
         assert_eq!(test_bck.health_check_interval, 1000);
 
         let mut test_updates = HashMap::new();
-        test_updates.insert(FromStr::from_str("127.0.0.1:8081").unwrap(), true);
+        test_updates.insert(FromStr::from_str("127.0.0.1:8091").unwrap(), true);
         test_bck.update_backends_health(&test_updates);
 
         let test_pool = test_bck.servers.read().unwrap();
@@ -246,26 +252,30 @@ mod tests {
     #[test]
     fn test_get_next() {
         thread::spawn( ||{
-            let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+            let listener = TcpListener::bind("127.0.0.1:8082").unwrap();
             match listener.accept() {
                 Ok((_socket, _addr)) => {},
                 Err(_e) => {},
             }
         });
+
+        let one_sec = time::Duration::from_secs(1);
+        thread::sleep(one_sec);
+
         let mut test_servers = HashMap::new();
-        test_servers.insert(FromStr::from_str("127.0.0.1:8080").unwrap(), Some(20));
+        test_servers.insert(FromStr::from_str("127.0.0.1:8082").unwrap(), Some(20));
         let test_bck = Arc::new(Backend::new("test".to_string(), test_servers, 1000));
 
         let ftr = get_next(test_bck);
         let test_weight: u16 = 20;
         assert!(ftr.weights.contains(&test_weight) && ftr.weights.len() == 1);
-        assert_eq!(ftr.weighted_servers[0], FromStr::from_str("127.0.0.1:8080").unwrap());
+        assert_eq!(ftr.weighted_servers[0], FromStr::from_str("127.0.0.1:8082").unwrap());
     }
 
     #[test]
     fn test_health_checker() {
         let mut test_servers = HashMap::new();
-        let test_addr = FromStr::from_str("127.0.0.1:8080").unwrap();
+        let test_addr = FromStr::from_str("127.0.0.1:8089").unwrap();
         test_servers.insert(test_addr, None);
 
         // nothing listening on 127.0.0.1:8080 yet so should be marked as unhealthy
@@ -275,14 +285,16 @@ mod tests {
             assert_eq!(test_srv_pool.servers_map.get(&test_addr).unwrap().healthy, false);
         }
 
-        // start listening on 127.0.0.1:8080 so next health checks will mark as healthy
+        // start listening on 127.0.0.1:8089 so next health checks will mark as healthy
         thread::spawn( ||{
-            let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+            let listener = TcpListener::bind("127.0.0.1:8089").unwrap();
             match listener.accept() {
                 Ok((_socket, _addr)) => {},
                 Err(_e) => {},
             }
         });
+        let one_sec = time::Duration::from_secs(1);
+        thread::sleep(one_sec);
 
         let (tx, rx) = channel();
 
@@ -294,7 +306,7 @@ mod tests {
         assert_eq!(resp.backend, "dummy".to_string());
         match resp.servers {
             Some(srvs) => {
-                assert!(srvs.get("127.0.0.1:8080").unwrap());
+                assert!(srvs.get("127.0.0.1:8089").unwrap());
             }
             None => assert!(false),
         }
