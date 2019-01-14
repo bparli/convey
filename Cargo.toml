@@ -23,3 +23,7 @@ iron = "0.4.0"
 router = "0.4.0"
 rand = "0.6"
 notify = "4.0"
+hash_ring = { git = "https://github.com/bparli/rust-hash-ring", branch = "derive-clone-hashring" }
+pnet = "0.21.0"
+pnet_macros_support = "0.21.0"
+threadpool = "1.7"

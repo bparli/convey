@@ -8,6 +8,7 @@ extern crate serde_derive;
 mod config;
 mod stats;
 mod proxy;
+mod passthrough;
 
 use docopt::Docopt;
 use self::config::Config;
@@ -19,13 +20,20 @@ Convey 0.1.1
 Usage:
   convey
   convey --config=<config_file>
+  convey --workers=<NUM_WORKERS>
+  convey (-p | --passthrough) --config=<config_file> --workers=<NUM_WORKERS>
+  convey (-p | --passthrough) --workers=<NUM_WORKERS>
+  convey (-p | --passthrough) --config=<config_file>
+  convey (-p | --passthrough)
   convey (-h | --help)
   convey (-v | --version)
 
 Options:
   -h, --help               Show this screen.
+  -p, --passthrough        Run load balancer in passthrough mode (instead of default proxy mode)
   --config=<config_file>   Config file location [default config.toml].
   -v, --version            Show version.
+  --workers=<NUM_WORKERS>             Number of worker threads in passthrough mode
 ";
 
 fn main() {
@@ -47,8 +55,19 @@ fn main() {
         Ok(config) => {
             info!("Config is: {:?}", config);
             let stats_sender = stats::run(&config.base);
-            let loadbalancer = proxy::Server::new(config);
-            loadbalancer.run(stats_sender);
+            if args.get_bool("--passthrough") {
+                let mut num_workers = 4;
+                if args.get_count("--workers") > 0 {
+                    num_workers = args.get_count("--workers");
+                }
+                debug!("Starting loadbalancer in passthrough mode");
+                let loadbalancer = passthrough::Server::new(config);
+                loadbalancer.run(stats_sender, num_workers);
+            } else {
+                debug!("Starting loadbalancer in proxy mode");
+                let loadbalancer = proxy::Server::new(config);
+                loadbalancer.run(stats_sender);
+            }
         },
         Err(e) => error!("Error loading configuration file: {:?}", e)
     }
