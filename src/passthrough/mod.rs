@@ -1,11 +1,11 @@
 extern crate pnet;
 extern crate pnet_macros_support;
 extern crate threadpool;
-#[macro_use]
+extern crate lru_time_cache;
+
 use self::backend::{Backend, ServerPool, Node};
 use crate::config::{Config, BaseConfig};
 use crate::stats::StatsMssg;
-
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::transport::{transport_channel};
 use pnet::transport::{TransportSender};
@@ -16,15 +16,16 @@ use pnet::packet::ipv4::{checksum, Ipv4Packet, MutableIpv4Packet};
 use pnet::packet::{MutablePacket, Packet};
 use std::net::{IpAddr, Ipv4Addr};
 use pnet::datalink::{self, NetworkInterface};
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::datalink::Channel::Ethernet;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::net::{SocketAddr};
 use std::str::FromStr;
 use std::sync::mpsc::{Sender, Receiver};
 use std::collections::HashMap;
 use std::{thread};
 use threadpool::ThreadPool;
+use lru_time_cache::LruCache;
 
 const IPV4_HEADER_LEN: usize = 20;
 const EPHEMERAL_PORT_LOWER: u16 = 32768;
@@ -35,6 +36,12 @@ mod backend;
 #[derive(Clone)]
 pub struct Server {
     pub lbs: Vec<LB>,
+}
+
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
+struct Client {
+    ip: IpAddr,
+    port: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -54,9 +61,9 @@ pub struct LB {
 
     backend: Arc<Backend>,
 
-    conn_tracker: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
+    conn_tracker: Arc<Mutex<LruCache<Client, Connection>>>,
 
-    port_mapper: Arc<RwLock<HashMap<u16, SocketAddr>>>,
+    port_mapper: Arc<Mutex<LruCache<u16, Client>>>,
 
     next_port: Arc<Mutex<u16>>
 }
@@ -67,6 +74,13 @@ impl Server {
         for (name,front) in config.base.frontends.iter() {
             let mut backend_servers = HashMap::new();
             let mut health_check_interval = 5;
+            let mut connection_tracker_capacity = 1000 as usize;
+
+            match config.base.passthrough {
+                Some(setting) => connection_tracker_capacity = setting.connection_tracker_capacity,
+                None => {},
+            }
+
             match config.base.backends.get(&front.backend) {
                 Some(back) => {
                     for (_,addr) in &back.servers {
@@ -97,8 +111,8 @@ impl Server {
                             listen_ip: ip4,
                             listen_port: listen_addr.port(),
                             backend: backend.clone(),
-                            conn_tracker: Arc::new(Mutex::new(HashMap::new())),
-                            port_mapper: Arc::new(RwLock::new(HashMap::new())),
+                            conn_tracker: Arc::new(Mutex::new(LruCache::<Client, Connection>::with_capacity(connection_tracker_capacity))),
+                            port_mapper: Arc::new(Mutex::new(LruCache::<u16, Client>::with_capacity(connection_tracker_capacity))),
                             next_port: Arc::new(Mutex::new(EPHEMERAL_PORT_LOWER)),
                         };
                         new_server.lbs.push(new_lb);
@@ -238,9 +252,14 @@ impl LB {
         new_ipv4.set_header_length(5);
 
         // check if we are already tracking this connection
-        let client_addr = SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source());
+        //let client_addr = SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source());
+
+        let cli = Client{
+            ip: IpAddr::V4(ip_header.get_source()),
+            port: tcp_header.get_source(),
+        };
         let mut connections = self.conn_tracker.lock().unwrap();
-        if let Some(conn) = connections.get(&client_addr) {
+        if let Some(conn) = connections.get(&cli) {
             match conn.backend_srv.host {
                 IpAddr::V4(fwd_ipv4) => {
 
@@ -268,7 +287,7 @@ impl LB {
                         // set ephemeral port for tracking connections and in case of mutiple clients using same port
                         let ephem_port: u16 = self.clone().next_avail_port();
                         debug!("Using Ephemeral port {} for client connection {:?}", ephem_port, SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source()));
-                        self.port_mapper.write().unwrap().insert(ephem_port, SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source()));
+                        self.port_mapper.lock().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: tcp_header.get_source()});
 
                         new_tcp.set_source(ephem_port);
                         new_tcp.set_destination(node.port);
@@ -285,12 +304,12 @@ impl LB {
 
                         // not already tracking the connection so insert into our maps
                         let conn = Connection {
-                            client: client_addr,
+                            client: SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source()),
                             backend_srv: node,
                             ephem_port: ephem_port,
                         };
 
-                        connections.insert(client_addr, conn);
+                        connections.insert(cli, conn);
                     }
                     _ => {}
                 }
@@ -319,13 +338,15 @@ fn process_packets(lb: &mut LB, ip_header: Ipv4Packet, tx: Arc<Mutex<TransportSe
             if tcp_header.get_destination() == lb.listen_port {
                 lb.client_handler(ip_header, tx);
             } else {
-                // server response should be in the port mapper already.  If not discard
+                // hack to workaround borrowing lb twice
                 let mut server_process = false;
-                let mut addr = SocketAddr::new( IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000);
-                if let Some(client_addr) = lb.port_mapper.read().unwrap().get(&tcp_header.get_destination()) {
-                    addr = *client_addr;
+                let mut addr = SocketAddr::new( IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+
+                if let Some(client_addr) = lb.port_mapper.lock().unwrap().get_mut(&tcp_header.get_destination()) {
+                    addr = SocketAddr::new( client_addr.ip, client_addr.port);
                     server_process = true;
                 }
+                // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
                 if server_process {
                     lb.server_response_handler(ip_header, &addr, tx);
                 }
@@ -382,7 +403,7 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>, workers: u64) {
                                     let ip_addr = ip_header.get_destination();
                                     if ip_addr == lb.listen_ip {
                                         let mut thread_lb = lb.clone();
-                                        let mut thread_tx = threads_tx.clone();
+                                        let thread_tx = threads_tx.clone();
                                         tpool.execute(move|| {
                                             process_packets(&mut thread_lb, ip_header, thread_tx);
                                         });

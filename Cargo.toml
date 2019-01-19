@@ -27,3 +27,4 @@ hash_ring = { git = "https://github.com/bparli/rust-hash-ring", branch = "derive
 pnet = "0.21.0"
 pnet_macros_support = "0.21.0"
 threadpool = "1.7"
+lru_time_cache = "0.8"

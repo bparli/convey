@@ -13,7 +13,6 @@ mod passthrough;
 use docopt::Docopt;
 use self::config::Config;
 
-
 const USAGE: &'static str = "
 Convey 0.1.1
 
