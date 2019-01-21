@@ -3,7 +3,7 @@ extern crate pnet_macros_support;
 extern crate threadpool;
 extern crate lru_time_cache;
 
-use self::backend::{Backend, ServerPool, Node};
+use self::backend::{Backend, ServerPool, Node, health_checker};
 use crate::config::{Config, BaseConfig};
 use crate::stats::StatsMssg;
 use pnet::packet::ip::IpNextHeaderProtocols;
@@ -26,8 +26,13 @@ use std::collections::HashMap;
 use std::{thread};
 use threadpool::ThreadPool;
 use lru_time_cache::LruCache;
+use tokio::prelude::*;
+use tokio::timer::Interval;
+use std::time::{Duration, Instant};
+use futures::future::lazy;
 
 const IPV4_HEADER_LEN: usize = 20;
+const TCP_HEADER_LEN: usize = 20;
 const EPHEMERAL_PORT_LOWER: u16 = 32768;
 const EPHEMERAL_PORT_UPPER: u16 = 61000;
 
@@ -252,8 +257,6 @@ impl LB {
         new_ipv4.set_header_length(5);
 
         // check if we are already tracking this connection
-        //let client_addr = SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source());
-
         let cli = Client{
             ip: IpAddr::V4(ip_header.get_source()),
             port: tcp_header.get_source(),
@@ -280,14 +283,16 @@ impl LB {
                 _ => {}
             }
         } else {
-            if let Some(node) = self.backend.get_next(IpAddr::V4(self.listen_ip), self.listen_port, IpAddr::V4(ip_header.get_source()), tcp_header.get_source()) {
+            if let Some(node) = self.backend.get_server(IpAddr::V4(self.listen_ip), self.listen_port, IpAddr::V4(ip_header.get_source()), tcp_header.get_source()) {
                 match node.host {
                     IpAddr::V4(fwd_ipv4) => {
 
                         // set ephemeral port for tracking connections and in case of mutiple clients using same port
                         let ephem_port: u16 = self.clone().next_avail_port();
                         debug!("Using Ephemeral port {} for client connection {:?}", ephem_port, SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source()));
-                        self.port_mapper.lock().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: tcp_header.get_source()});
+                        {
+                            self.port_mapper.lock().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: tcp_header.get_source()});
+                        }
 
                         new_tcp.set_source(ephem_port);
                         new_tcp.set_destination(node.port);
@@ -314,7 +319,30 @@ impl LB {
                     _ => {}
                 }
             } else {
-                error!("Unable to find backend")
+                error!("Unable to find backend");
+                // Send RST to client
+                new_tcp.set_source(self.listen_port);
+                new_tcp.set_destination(tcp_header.get_source());
+                if tcp_header.get_flags() == tcp::TcpFlags::SYN {
+                    // reply ACK, RST
+                    new_tcp.set_flags(0b000010100);
+                } else {
+                    new_tcp.set_flags(tcp::TcpFlags::RST);
+                }
+                new_tcp.set_acknowledgement(tcp_header.get_sequence().clone() + 1);
+                new_tcp.set_sequence(0);
+                new_tcp.set_window(0);
+                new_tcp.set_checksum(tcp::ipv4_checksum(&new_tcp.to_immutable(), &self.listen_ip, &ip_header.get_source()));
+
+                new_ipv4.set_payload(&new_tcp.packet());
+                new_ipv4.set_total_length(new_tcp.packet().len() as u16 + IPV4_HEADER_LEN as u16);
+                new_ipv4.set_destination(ip_header.get_source());
+                new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
+
+                match tx.lock().unwrap().send_to(new_ipv4, cli.ip) {
+                    Ok(n) => debug!("Sent {} bytes to Client", n),
+                    Err(e) => debug!("failed to send packet: {}", e),
+                }
             }
         }
     }
@@ -359,6 +387,11 @@ fn process_packets(lb: &mut LB, ip_header: Ipv4Packet, tx: Arc<Mutex<TransportSe
 pub fn run_server(lb: LB, sender: Sender<StatsMssg>, workers: u64) {
     debug!("Listening for: {:?}, {:?}", lb.listen_ip, lb.listen_port);
     debug!("Load Balancing to: {:?}", lb.backend.name);
+
+    let backend = lb.backend.clone();
+    thread::spawn( move || {
+        sched_health_checks(backend, sender.clone());
+    });
 
     let interface = match find_interface(lb.listen_ip) {
         Some(interface) => {
@@ -421,4 +454,21 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>, workers: u64) {
             }
         }
     }
+}
+
+fn sched_health_checks(backend: Arc<Backend>, sender: Sender<StatsMssg>) {
+    tokio::run(lazy( move || {
+        // schedule health checker
+        let time = backend.health_check_interval;
+        let timer_sender = sender.clone();
+        let task = Interval::new(Instant::now(), Duration::from_secs(time))
+            .for_each(move |instant| {
+                health_checker(backend.clone(), &timer_sender);
+                debug!("Running backend health checker{:?}", instant);
+                Ok(())
+            })
+            .map_err(|e| panic!("interval errored; err={:?}", e));
+        tokio::spawn(task);
+        Ok(())
+    }));
 }

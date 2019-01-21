@@ -46,7 +46,7 @@ impl Backend {
         }
     }
 
-    pub fn get_next(&self, ip_dst: IpAddr, port_dst: u16, ip_src: IpAddr, port_src: u16) -> Option<Node> {
+    pub fn get_server(&self, ip_dst: IpAddr, port_dst: u16, ip_src: IpAddr, port_src: u16) -> Option<Node> {
 
         // Build "4-tuple of destination ip, destination port, source ip, source port
         // in form of str to feed to hashring"
@@ -68,6 +68,7 @@ impl Backend {
         let mut srvs = self.servers.write().unwrap();
         for (srv, healthy) in updates {
             if let Some(s) = srvs.servers_map.get_mut(&srv) {
+                debug!("Set {} health status to {} from {}", srv, *healthy, *s);
                 *s = *healthy;
                 if *healthy {
                     srvs.ring.add_node(&Node{host: srv.ip(), port: srv.port()})
@@ -98,6 +99,8 @@ impl ServerPool {
                 continue
             }
         }
+
+        debug!("New Server Pool with map {:?} and hashring nodes {:?}", backend_servers, nodes);
         ServerPool{
             servers_map: backend_servers,
             ring: HashRing::new(nodes, 100),
@@ -213,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_next() {
+    fn test_get_server() {
         thread::spawn( ||{
             let listener = TcpListener::bind("127.0.0.1:8082").unwrap();
             match listener.accept() {
