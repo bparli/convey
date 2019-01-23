@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 use crate::stats::StatsMssg;
 use std::sync::mpsc::{Sender};
 use std::net::{IpAddr};
+use std::str::FromStr;
 use hash_ring::HashRing;
 
 #[derive(Debug, Clone)]
@@ -55,12 +56,24 @@ impl Backend {
         tuple.push_str(&ip_src.to_string());
         tuple.push_str(&port_src.to_string());
 
-        let srvs = self.servers.read().unwrap();
-        let mut new_ring = srvs.ring.clone();
+        let mut srvs = self.servers.write().unwrap();
+        debug!("Scheduling backend server for {} with ring {:?}", tuple, srvs.ring);
+        match srvs.ring.get_node(tuple.to_string().clone()){
+            Some(node) => {
+                debug!("Scheduled backend server {:?} for tuple {}", node, tuple);
+                Some(node.clone())
+            },
+            None => {
+                debug!("What happened? {:?}", srvs.ring);
+                None
+            }
+        }
+    }
 
-        match new_ring.get_node(tuple.to_string().clone()){
-            Some(node) => Some(node.clone()),
-            None => None,
+    pub fn get_server_health(&self, server: Node) -> bool {
+        match self.servers.read().unwrap().servers_map.get(&SocketAddr::new(server.host, server.port)) {
+            Some(healthy) => *healthy,
+            None => false,
         }
     }
 
@@ -91,7 +104,7 @@ impl ServerPool {
             if server.is_ipv4() {
                 if tcp_health_check(*server) {
                     backend_servers.insert(*server, true);
-                    nodes.push(Node{host: server.ip().clone(), port: server.port()})
+                    nodes.push(Node{host: server.ip(), port: server.port()})
                 } else {
                     backend_servers.insert(*server, false);
                 }
@@ -103,7 +116,7 @@ impl ServerPool {
         debug!("New Server Pool with map {:?} and hashring nodes {:?}", backend_servers, nodes);
         ServerPool{
             servers_map: backend_servers,
-            ring: HashRing::new(nodes, 100),
+            ring: HashRing::new(nodes, 3),
         }
     }
 }
@@ -127,8 +140,8 @@ pub fn health_checker(backend: Arc<Backend>, sender: &Sender<StatsMssg>) {
             if res != *status {
                 info!("Server {} status has changed from {} to {}.  Updating stats and backend", server, status, res);
                 update = true;
+                backend_status.insert(server.clone(), res);
             }
-            backend_status.insert(server.clone(), res);
         }
     }
 
