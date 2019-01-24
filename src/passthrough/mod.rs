@@ -135,7 +135,7 @@ impl Server {
 
     // wait on config changes to update backend server pool
     fn config_sync(&mut self, rx: Receiver<BaseConfig>) {
-        let lbs = self.lbs.clone();
+        let mut lbs = self.lbs.clone();
         thread::spawn( move || {
             loop {
                 match rx.recv() {
@@ -149,11 +149,12 @@ impl Server {
                                                   .expect("Failed to parse listen host:port string");
                                 backend_servers.insert(listen_addr, server.weight);
                             }
-                            //let new_server_pool = ServerPool::new_servers(backend_servers);
-                            for lb in lbs.iter() {
+                            for lb in lbs.iter_mut() {
                                 if lb.backend.name == backend_name {
                                     info!("Updating backend {} with {:?}", backend_name, backend_servers.clone());
-                                    *lb.backend.servers.write().unwrap() = ServerPool::new_servers(backend_servers.clone());
+                                    let srv_pool = ServerPool::new_servers(backend_servers.clone());
+                                    *lb.backend.servers_map.write().unwrap() = srv_pool.servers_map;
+                                    *lb.backend.ring.lock().unwrap() = srv_pool.ring;
                                 }
                             }
                         }
@@ -191,7 +192,7 @@ impl LB {
         *port
     }
 
-    fn server_response_handler(&mut self, ip_header: Ipv4Packet, client_addr: &SocketAddr, tx: Arc<Mutex<TransportSender>>) {
+    fn server_response_handler(&mut self, ip_header: Ipv4Packet, client_addr: &SocketAddr, tx: Arc<Mutex<TransportSender>>, sender: Sender<StatsMssg>) {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
@@ -224,7 +225,25 @@ impl LB {
                 new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
 
                 match tx.lock().unwrap().send_to(new_ipv4, client_addr.ip()) {
-                    Ok(n) => debug!("Sent {} bytes to Client", n),
+                    Ok(n) => {
+                        // update stats connections
+                        let mut mssg = StatsMssg{frontend: Some(self.name.clone()),
+                                            backend: self.backend.name.clone(),
+                                            connections: 0,
+                                            bytes_tx: 0,
+                                            bytes_rx:  n as u64,
+                                            servers: None};
+                        match tcp_header.get_flags() {
+                            0b000010010 => mssg.connections = 1, // add a connection to count on SYN,ACK
+                            0b000010001 => mssg.connections = -1, // sub a connection to count on FIN,ACK
+                            _ => {},
+                        }
+
+                        match sender.send(mssg) {
+                            Ok(_) => {},
+                            Err(e) => error!("Error sending stats message on channel: {}", e)
+                        }
+                    }
                     Err(e) => debug!("failed to send packet to {:?}: Error: {}", client_addr, e),
                 }
             }
@@ -232,7 +251,7 @@ impl LB {
         }
     }
 
-    fn client_handler(&mut self, ip_header: Ipv4Packet, tx: Arc<Mutex<TransportSender>>) {
+    fn client_handler(&mut self, ip_header: Ipv4Packet, tx: Arc<Mutex<TransportSender>>, sender: Sender<StatsMssg>) {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
@@ -279,7 +298,19 @@ impl LB {
                         new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
 
                         match tx.lock().unwrap().send_to(new_ipv4, conn.backend_srv.host.clone()) {
-                            Ok(n) => debug!("Sent {} bytes to Server", n),
+                            Ok(n) => {
+                                debug!("Sent {} bytes to Server", n);
+                                let mssg = StatsMssg{frontend: Some(self.name.clone()),
+                                                    backend: self.backend.name.clone(),
+                                                    connections: 0,
+                                                    bytes_tx: n as u64,
+                                                    bytes_rx: 0,
+                                                    servers: None};
+                                match sender.send(mssg) {
+                                    Ok(_) => {},
+                                    Err(e) => error!("Error sending stats message on channel: {}", e)
+                                }
+                            },
                             Err(e) => error!("failed to send packet: {}", e),
                         }
                         return
@@ -321,7 +352,19 @@ impl LB {
                     new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
 
                     match tx.lock().unwrap().send_to(new_ipv4, node.host.clone()) {
-                        Ok(n) => debug!("Sent {} bytes to Server", n),
+                        Ok(n) => {
+                            debug!("Sent {} bytes to Server", n);
+                            let mssg = StatsMssg{frontend: Some(self.name.clone()),
+                                                backend: self.backend.name.clone(),
+                                                connections: 0,
+                                                bytes_tx: n as u64,
+                                                bytes_rx: 0,
+                                                servers: None};
+                            match sender.send(mssg) {
+                                Ok(_) => {},
+                                Err(e) => error!("Error sending stats message on channel: {}", e)
+                            }
+                        }
                         Err(e) => debug!("failed to send packet: {}", e),
                     }
 
@@ -337,7 +380,6 @@ impl LB {
             }
         } else {
             error!("Unable to find backend");
-            debug!("Server state {:?}", self.backend.servers.read().unwrap().servers_map);
             // Send RST to client
             new_tcp.set_source(self.listen_port);
             new_tcp.set_destination(tcp_header.get_source());
@@ -361,6 +403,16 @@ impl LB {
                 Ok(n) => debug!("Sent {} bytes to Client", n),
                 Err(e) => error!("failed to send packet: {}", e),
             }
+            let mssg = StatsMssg{frontend: Some(self.name.clone()),
+                                backend: self.backend.name.clone(),
+                                connections: -1,
+                                bytes_tx: 0,
+                                bytes_rx: 0,
+                                servers: None};
+            match sender.send(mssg) {
+                Ok(_) => {},
+                Err(e) => error!("Error sending stats message on channel: {}", e)
+            }
         }
     }
 }
@@ -377,15 +429,15 @@ fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
     return None
 }
 
-fn process_packets(lb: &mut LB, ip_header: Ipv4Packet, tx: Arc<Mutex<TransportSender>>) {
+fn process_packets(lb: &mut LB, ip_header: Ipv4Packet, tx: Arc<Mutex<TransportSender>>, sender: Sender<StatsMssg>) {
     match TcpPacket::new(ip_header.payload()) {
         Some(tcp_header) => {
             if tcp_header.get_destination() == lb.listen_port {
-                lb.client_handler(ip_header, tx);
+                lb.client_handler(ip_header, tx, sender);
             } else {
                 if let Some(client_addr) = lb.port_mapper.lock().unwrap().get_mut(&tcp_header.get_destination()) {
                     // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
-                    lb.clone().server_response_handler(ip_header, &SocketAddr::new( client_addr.ip, client_addr.port), tx);
+                    lb.clone().server_response_handler(ip_header, &SocketAddr::new( client_addr.ip, client_addr.port), tx, sender);
                 }
             }
         }
@@ -398,8 +450,9 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>, workers: u64) {
     debug!("Load Balancing to: {:?}", lb.backend.name);
 
     let backend = lb.backend.clone();
+    let health_sender = sender.clone();
     thread::spawn( move || {
-        sched_health_checks(backend, sender.clone());
+        sched_health_checks(backend, health_sender);
     });
 
     let interface = match find_interface(lb.listen_ip) {
@@ -446,8 +499,9 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>, workers: u64) {
                                     if ip_addr == lb.listen_ip {
                                         let mut thread_lb = lb.clone();
                                         let thread_tx = threads_tx.clone();
+                                        let thread_sender = sender.clone();
                                         tpool.execute(move|| {
-                                            process_packets(&mut thread_lb, ip_header, thread_tx);
+                                            process_packets(&mut thread_lb, ip_header, thread_tx, thread_sender);
                                         });
                                     }
                                 },
