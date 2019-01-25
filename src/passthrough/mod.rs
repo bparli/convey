@@ -274,7 +274,7 @@ impl LB {
         new_ipv4.set_source(self.listen_ip);
         new_ipv4.set_header_length(5);
 
-        // check if we are already tracking this connection
+        //check if we are already tracking this connection
         let cli = Client{
             ip: IpAddr::V4(ip_header.get_source()),
             port: tcp_header.get_source(),
@@ -283,7 +283,7 @@ impl LB {
         // flag for removing client connection from connection tracker
         let mut cli_unhealthy = false;
 
-        if let Some(conn) = self.conn_tracker.lock().unwrap().get(&cli) {
+        if let Some(conn) = self.cli_connection(&cli) {
             debug!("Found existing connection {:?}", conn);
             match conn.backend_srv.host {
                 IpAddr::V4(node_ipv4) => {
@@ -414,6 +414,13 @@ impl LB {
                 Err(e) => error!("Error sending stats message on channel: {}", e)
             }
         }
+    }
+
+    fn cli_connection(&mut self, cli: &Client) -> Option<Connection>{
+        if let Some(conn) = self.conn_tracker.lock().unwrap().get(&cli) {
+            return Some(conn.clone());
+        }
+        None
     }
 }
 
