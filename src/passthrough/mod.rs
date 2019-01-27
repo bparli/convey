@@ -8,7 +8,6 @@ use crate::config::{Config, BaseConfig};
 use crate::stats::StatsMssg;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::transport::{transport_channel};
-use pnet::transport::{TransportSender};
 use pnet::transport::TransportChannelType::{Layer3};
 use pnet::packet::tcp::{TcpPacket, MutableTcpPacket};
 use pnet::packet::{tcp};
@@ -21,7 +20,8 @@ use pnet::datalink::Channel::Ethernet;
 use std::sync::{Arc, Mutex};
 use std::net::{SocketAddr};
 use std::str::FromStr;
-use std::sync::mpsc::{Sender, Receiver, channel};
+use std::sync::mpsc::{Sender, Receiver};
+use crossbeam_channel::unbounded;
 use std::collections::HashMap;
 use std::{thread};
 use threadpool::ThreadPool;
@@ -220,7 +220,7 @@ impl LB {
         *port
     }
 
-    fn server_response_handler(&mut self, ip_header: Ipv4Packet, client_addr: &SocketAddr, tx: Sender<Transmit>) {
+    fn server_response_handler(&mut self, ip_header: Ipv4Packet, client_addr: &SocketAddr, tx: crossbeam_channel::Sender<Transmit>) {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
@@ -274,7 +274,7 @@ impl LB {
         }
     }
 
-    fn client_handler(&mut self, ip_header: Ipv4Packet, tx: Sender<Transmit>) {
+    fn client_handler(&mut self, ip_header: Ipv4Packet, tx: crossbeam_channel::Sender<Transmit>) {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
@@ -446,7 +446,7 @@ impl LB {
     }
 }
 
-fn transmitter (channel_rx: Receiver<Transmit>, sender: Sender<StatsMssg>) {
+fn run_transmitter (channel_rx: crossbeam_channel::Receiver<Transmit>, sender: Sender<StatsMssg>) {
     let tx_protocol = Layer3(IpNextHeaderProtocols::Tcp);
     let (mut tx, _) = match transport_channel(4096, tx_protocol) {
         Ok((tx, rx)) => (tx, rx),
@@ -503,7 +503,7 @@ fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
     return None
 }
 
-fn process_packets(lb: &mut LB, ip_header: Ipv4Packet, tx: Sender<Transmit>) {
+fn process_packets(lb: &mut LB, ip_header: Ipv4Packet, tx: crossbeam_channel::Sender<Transmit>) {
     match TcpPacket::new(ip_header.payload()) {
         Some(tcp_header) => {
             if tcp_header.get_destination() == lb.listen_port {
@@ -550,21 +550,14 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
 
     let tpool = ThreadPool::new(lb.workers);
 
-    let tx_protocol = Layer3(IpNextHeaderProtocols::Tcp);
-    let (tx, _) = match transport_channel(4096, tx_protocol) {
-        Ok((tx, rx)) => (tx, rx),
-        Err(e) => {
-            error!("Error {}", e);
-            return
-        },
-    };
-
-    let threads_tx = Arc::new(Mutex::new(tx));
-
-    let (channel_tx, channel_rx) = channel();
-    thread::spawn(move || {
-        transmitter(channel_rx, sender)
-    });
+    let (channel_tx, channel_rx) = unbounded();
+    for _ in 0..4 {
+        let thread_rx = channel_rx.clone();
+        let thread_sender = sender.clone();
+        thread::spawn(move || {
+            run_transmitter(thread_rx, thread_sender)
+        });
+    }
 
     loop {
         match rx.next() {
