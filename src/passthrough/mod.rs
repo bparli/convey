@@ -21,7 +21,7 @@ use pnet::datalink::Channel::Ethernet;
 use std::sync::{Arc, Mutex};
 use std::net::{SocketAddr};
 use std::str::FromStr;
-use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc::{Sender, Receiver, channel};
 use std::collections::HashMap;
 use std::{thread};
 use threadpool::ThreadPool;
@@ -55,6 +55,16 @@ struct Connection {
     ephem_port: u16,
 }
 
+struct Transmit {
+    ip_packet: Vec<u8>,
+    ip_addr: IpAddr,
+    frontend_name: String,
+    backend_name: String,
+    connections: i32,
+    from_client: bool,
+    from_server: bool,
+}
+
 #[derive(Clone)]
 pub struct LB {
     name: String,
@@ -69,7 +79,11 @@ pub struct LB {
 
     port_mapper: Arc<Mutex<HashMap<u16, Client>>>,
 
-    next_port: Arc<Mutex<u16>>
+    next_port: Arc<Mutex<u16>>,
+
+    workers: usize,
+
+    dsr: bool
 }
 
 impl Server {
@@ -77,11 +91,23 @@ impl Server {
         let mut new_server = Server {lbs: Vec::new()};
         for (name,front) in config.base.frontends.iter() {
             let mut backend_servers = HashMap::new();
+
+            // Set defaults
             let mut health_check_interval = 5;
             let mut connection_tracker_capacity = 1000 as usize;
+            let mut workers = 4 as usize;
+            let mut dsr = false;
 
             match config.base.passthrough {
-                Some(setting) => connection_tracker_capacity = setting.connection_tracker_capacity,
+                Some(setting) => {
+                    connection_tracker_capacity = setting.connection_tracker_capacity;
+                    if let Some(num) = setting.workers {
+                        workers = num;
+                    }
+                    if let Some(flag) = setting.dsr {
+                        dsr = flag;
+                    }
+                },
                 None => {},
             }
 
@@ -118,6 +144,8 @@ impl Server {
                             conn_tracker: Arc::new(Mutex::new(LruCache::<Client, Connection>::with_capacity(connection_tracker_capacity))),
                             port_mapper: Arc::new(Mutex::new(HashMap::new())),
                             next_port: Arc::new(Mutex::new(EPHEMERAL_PORT_LOWER)),
+                            workers: workers,
+                            dsr: dsr,
                         };
                         new_server.lbs.push(new_lb);
                     }
@@ -165,13 +193,13 @@ impl Server {
         });
     }
 
-    pub fn run(self, sender: Sender<StatsMssg>, workers: u64) {
+    pub fn run(self, sender: Sender<StatsMssg>) {
         let mut threads = Vec::new();
         for lb in self.lbs.iter() {
             let srv_thread = lb.clone();
             let thread_sender = sender.clone();
             let t = thread::spawn(move ||{
-                run_server(srv_thread, thread_sender, workers)
+                run_server(srv_thread, thread_sender);
             });
             threads.push(t);
         }
@@ -192,7 +220,7 @@ impl LB {
         *port
     }
 
-    fn server_response_handler(&mut self, ip_header: Ipv4Packet, client_addr: &SocketAddr, tx: Arc<Mutex<TransportSender>>, sender: Sender<StatsMssg>) {
+    fn server_response_handler(&mut self, ip_header: Ipv4Packet, client_addr: &SocketAddr, tx: Sender<Transmit>) {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
@@ -203,12 +231,12 @@ impl LB {
 
         match client_addr.ip() {
             IpAddr::V4(client_ipv4) => {
-                let mut vec: Vec<u8> = vec![0; tcp_header.packet().len()];
-                let mut new_tcp = MutableTcpPacket::new(&mut vec[..]).unwrap();
+                let vec: Vec<u8> = vec![0; tcp_header.packet().len()];
+                let mut new_tcp = MutableTcpPacket::owned(vec).unwrap();
                 new_tcp.clone_from(&tcp_header);
 
-                let mut ipbuf = vec!(0; new_tcp.packet().len() + IPV4_HEADER_LEN);
-                let mut new_ipv4 = MutableIpv4Packet::new(&mut ipbuf).unwrap();
+                let ipbuf: Vec<u8> = vec!(0; new_tcp.packet().len() + IPV4_HEADER_LEN);
+                let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
                 new_ipv4.clone_from(&ip_header);
                 new_tcp.set_destination(client_addr.port());
                 new_tcp.set_source(self.listen_port);
@@ -224,34 +252,29 @@ impl LB {
                 new_ipv4.set_header_length(5);
                 new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
 
-                match tx.lock().unwrap().send_to(new_ipv4, client_addr.ip()) {
-                    Ok(n) => {
-                        // update stats connections
-                        let mut mssg = StatsMssg{frontend: Some(self.name.clone()),
-                                            backend: self.backend.name.clone(),
-                                            connections: 0,
-                                            bytes_tx: 0,
-                                            bytes_rx:  n as u64,
-                                            servers: None};
-                        match tcp_header.get_flags() {
-                            0b000010010 => mssg.connections = 1, // add a connection to count on SYN,ACK
-                            0b000010001 => mssg.connections = -1, // sub a connection to count on FIN,ACK
-                            _ => {},
-                        }
-
-                        match sender.send(mssg) {
-                            Ok(_) => {},
-                            Err(e) => error!("Error sending stats message on channel: {}", e)
-                        }
-                    }
-                    Err(e) => debug!("failed to send packet to {:?}: Error: {}", client_addr, e),
+                let mut connections = 0;
+                match tcp_header.get_flags() {
+                    0b000010010 => connections = 1, // add a connection to count on SYN,ACK
+                    0b000010001 => connections = -1, // sub a connection to count on FIN,ACK
+                    _ => {},
                 }
+
+                let transmit = Transmit{
+                    ip_packet: new_ipv4.packet().to_owned(),
+                    ip_addr: client_addr.ip(),
+                    frontend_name: self.name.clone(),
+                    backend_name: self.backend.name.clone(),
+                    connections: connections,
+                    from_client: false,
+                    from_server: true,
+                };
+                tx.send(transmit).unwrap();
             }
             _ => {} // ipv6 not supported (yet)
         }
     }
 
-    fn client_handler(&mut self, ip_header: Ipv4Packet, tx: Arc<Mutex<TransportSender>>, sender: Sender<StatsMssg>) {
+    fn client_handler(&mut self, ip_header: Ipv4Packet, tx: Sender<Transmit>) {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
@@ -261,18 +284,23 @@ impl LB {
         };
 
         // setup forwarding packet
-        let mut vec: Vec<u8> = vec![0; tcp_header.packet().len()];
-        let mut new_tcp = MutableTcpPacket::new(&mut vec[..]).unwrap();
+        let vec: Vec<u8> = vec![0; tcp_header.packet().len()];
+        let mut new_tcp = MutableTcpPacket::owned(vec).unwrap();
         new_tcp.clone_from(&tcp_header);
-        let mut ipbuf = vec!(0; tcp_header.packet().len() + IPV4_HEADER_LEN);
-        let mut new_ipv4 = MutableIpv4Packet::new(&mut ipbuf).unwrap();
+        let ipbuf: Vec<u8> = vec!(0; tcp_header.packet().len() + IPV4_HEADER_LEN);
+        let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
+
         new_ipv4.clone_from(&ip_header);
         new_ipv4.set_total_length(tcp_header.packet().len() as u16 + IPV4_HEADER_LEN as u16);
         new_ipv4.set_version(4);
         new_ipv4.set_ttl(225);
         new_ipv4.set_next_level_protocol(IpNextHeaderProtocols::Tcp);
-        new_ipv4.set_source(self.listen_ip);
         new_ipv4.set_header_length(5);
+
+        // leave original ip source if dsr
+        if !self.dsr {
+            new_ipv4.set_source(self.listen_ip);
+        }
 
         //check if we are already tracking this connection
         let cli = Client{
@@ -289,7 +317,11 @@ impl LB {
                 IpAddr::V4(node_ipv4) => {
                     let fwd_ipv4 = node_ipv4.clone();
                     if self.backend.get_server_health(conn.backend_srv.clone()) {
-                        new_tcp.set_source(conn.ephem_port);
+                        // leave original tcp source if dsr
+                        if !self.dsr {
+                            new_tcp.set_source(conn.ephem_port);
+                        }
+
                         new_tcp.set_destination(conn.backend_srv.port);
                         new_tcp.set_checksum(tcp::ipv4_checksum(&new_tcp.to_immutable(), &self.listen_ip, &fwd_ipv4));
 
@@ -297,22 +329,17 @@ impl LB {
                         new_ipv4.set_destination(fwd_ipv4);
                         new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
 
-                        match tx.lock().unwrap().send_to(new_ipv4, conn.backend_srv.host.clone()) {
-                            Ok(n) => {
-                                debug!("Sent {} bytes to Server", n);
-                                let mssg = StatsMssg{frontend: Some(self.name.clone()),
-                                                    backend: self.backend.name.clone(),
-                                                    connections: 0,
-                                                    bytes_tx: n as u64,
-                                                    bytes_rx: 0,
-                                                    servers: None};
-                                match sender.send(mssg) {
-                                    Ok(_) => {},
-                                    Err(e) => error!("Error sending stats message on channel: {}", e)
-                                }
-                            },
-                            Err(e) => error!("failed to send packet: {}", e),
-                        }
+                        let transmit = Transmit{
+                            ip_packet: new_ipv4.packet().to_owned(),
+                            ip_addr: conn.backend_srv.host.clone(),
+                            frontend_name: self.name.clone(),
+                            backend_name: self.backend.name.clone(),
+                            connections: 0,
+                            from_client: true,
+                            from_server: false,
+                        };
+
+                        tx.send(transmit).unwrap();
                         return
                     } else {
                         debug!("Backend sever {:?} is no longer healthy.  Rescheduling", conn.backend_srv);
@@ -336,14 +363,19 @@ impl LB {
             match node.host {
                 IpAddr::V4(node_ipv4) => {
                     let fwd_ipv4 = node_ipv4.clone();
-                    // set ephemeral port for tracking connections and in case of mutiple clients using same port
-                    let ephem_port: u16 = self.clone().next_avail_port();
-                    debug!("Using Ephemeral port {} for client connection {:?}", ephem_port, SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source()));
-                    {
-                        self.port_mapper.lock().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: tcp_header.get_source()});
+
+                    // leave original tcp source if dsr
+                    let mut ephem_port = 0 as u16;
+                    if !self.dsr {
+                        // set ephemeral port for tracking connections and in case of mutiple clients using same port
+                        ephem_port = self.clone().next_avail_port();
+                        debug!("Using Ephemeral port {} for client connection {:?}", ephem_port, SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source()));
+                        {
+                            self.port_mapper.lock().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: tcp_header.get_source()});
+                        }
+                        new_tcp.set_source(ephem_port);
                     }
 
-                    new_tcp.set_source(ephem_port);
                     new_tcp.set_destination(node.port);
                     new_tcp.set_checksum(tcp::ipv4_checksum(&new_tcp.to_immutable(), &self.listen_ip, &fwd_ipv4));
 
@@ -351,22 +383,16 @@ impl LB {
                     new_ipv4.set_destination(fwd_ipv4);
                     new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
 
-                    match tx.lock().unwrap().send_to(new_ipv4, node.host.clone()) {
-                        Ok(n) => {
-                            debug!("Sent {} bytes to Server", n);
-                            let mssg = StatsMssg{frontend: Some(self.name.clone()),
-                                                backend: self.backend.name.clone(),
-                                                connections: 0,
-                                                bytes_tx: n as u64,
-                                                bytes_rx: 0,
-                                                servers: None};
-                            match sender.send(mssg) {
-                                Ok(_) => {},
-                                Err(e) => error!("Error sending stats message on channel: {}", e)
-                            }
-                        }
-                        Err(e) => debug!("failed to send packet: {}", e),
-                    }
+                    let transmit = Transmit{
+                        ip_packet: new_ipv4.packet().to_owned(),
+                        ip_addr: node.host.clone(),
+                        frontend_name: self.name.clone(),
+                        backend_name: self.backend.name.clone(),
+                        connections: 0,
+                        from_client: true,
+                        from_server: false,
+                    };
+                    tx.send(transmit).unwrap();
 
                     // not already tracking the connection so insert into our maps
                     let conn = Connection {
@@ -399,20 +425,16 @@ impl LB {
             new_ipv4.set_destination(ip_header.get_source());
             new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
 
-            match tx.lock().unwrap().send_to(new_ipv4, cli.ip) {
-                Ok(n) => debug!("Sent {} bytes to Client", n),
-                Err(e) => error!("failed to send packet: {}", e),
-            }
-            let mssg = StatsMssg{frontend: Some(self.name.clone()),
-                                backend: self.backend.name.clone(),
-                                connections: -1,
-                                bytes_tx: 0,
-                                bytes_rx: 0,
-                                servers: None};
-            match sender.send(mssg) {
-                Ok(_) => {},
-                Err(e) => error!("Error sending stats message on channel: {}", e)
-            }
+            let transmit = Transmit{
+                ip_packet: new_ipv4.packet().to_owned(),
+                ip_addr: cli.ip,
+                frontend_name: self.name.clone(),
+                backend_name: self.backend.name.clone(),
+                connections: -1,
+                from_client: true,
+                from_server: false,
+            };
+            tx.send(transmit).unwrap();
         }
     }
 
@@ -421,6 +443,51 @@ impl LB {
             return Some(conn.clone());
         }
         None
+    }
+}
+
+fn transmitter (channel_rx: Receiver<Transmit>, sender: Sender<StatsMssg>) {
+    let tx_protocol = Layer3(IpNextHeaderProtocols::Tcp);
+    let (mut tx, _) = match transport_channel(4096, tx_protocol) {
+        Ok((tx, rx)) => (tx, rx),
+        Err(e) => {
+            error!("Error setting up transmission channel thread {}", e);
+            return
+        },
+    };
+
+    loop {
+        match channel_rx.recv() {
+            Ok(new_packet) => {
+                if let Some(pckt) = Ipv4Packet::new(&new_packet.ip_packet) {
+                    match tx.send_to(pckt, new_packet.ip_addr) {
+                        Ok(n) => {
+                            debug!("Sent {} bytes to Server", n);
+                            let (mut bytes_rx, mut bytes_tx) = (0, 0);
+                            if new_packet.from_client {
+                                bytes_tx = n;
+                            } else if new_packet.from_server {
+                                bytes_rx = n;
+                            }
+                            let mssg = StatsMssg{frontend: Some(new_packet.frontend_name),
+                                                backend: new_packet.backend_name,
+                                                connections: new_packet.connections,
+                                                bytes_tx: bytes_tx as u64,
+                                                bytes_rx: bytes_rx as u64,
+                                                servers: None};
+                            match sender.send(mssg) {
+                                Ok(_) => {},
+                                Err(e) => error!("Error sending stats message on channel: {}", e)
+                            }
+                        },
+                        Err(e) => error!("failed to send packet: {}", e),
+                    }
+                } else {
+                    error!("Transmitter thread received bd packet {:?}", &new_packet.ip_packet);
+                }
+            }
+            Err(e) => error!("failed to receive new packet on transmitter thread: {}", e),
+        }
     }
 }
 
@@ -436,15 +503,16 @@ fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
     return None
 }
 
-fn process_packets(lb: &mut LB, ip_header: Ipv4Packet, tx: Arc<Mutex<TransportSender>>, sender: Sender<StatsMssg>) {
+fn process_packets(lb: &mut LB, ip_header: Ipv4Packet, tx: Sender<Transmit>) {
     match TcpPacket::new(ip_header.payload()) {
         Some(tcp_header) => {
             if tcp_header.get_destination() == lb.listen_port {
-                lb.client_handler(ip_header, tx, sender);
-            } else {
+                lb.client_handler(ip_header, tx);
+            } else if !lb.dsr {
+                // only handling server repsonses if not using dsr
                 if let Some(client_addr) = lb.port_mapper.lock().unwrap().get_mut(&tcp_header.get_destination()) {
                     // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
-                    lb.clone().server_response_handler(ip_header, &SocketAddr::new( client_addr.ip, client_addr.port), tx, sender);
+                    lb.clone().server_response_handler(ip_header, &SocketAddr::new( client_addr.ip, client_addr.port), tx);
                 }
             }
         }
@@ -452,7 +520,7 @@ fn process_packets(lb: &mut LB, ip_header: Ipv4Packet, tx: Arc<Mutex<TransportSe
     }
 }
 
-pub fn run_server(lb: LB, sender: Sender<StatsMssg>, workers: u64) {
+pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
     debug!("Listening for: {:?}, {:?}", lb.listen_ip, lb.listen_port);
     debug!("Load Balancing to: {:?}", lb.backend.name);
 
@@ -480,7 +548,7 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>, workers: u64) {
         Err(e) => panic!("An error occurred when creating the datalink channel: {}", e)
     };
 
-    let tpool = ThreadPool::new(workers as usize);
+    let tpool = ThreadPool::new(lb.workers);
 
     let tx_protocol = Layer3(IpNextHeaderProtocols::Tcp);
     let (tx, _) = match transport_channel(4096, tx_protocol) {
@@ -492,6 +560,11 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>, workers: u64) {
     };
 
     let threads_tx = Arc::new(Mutex::new(tx));
+
+    let (channel_tx, channel_rx) = channel();
+    thread::spawn(move || {
+        transmitter(channel_rx, sender)
+    });
 
     loop {
         match rx.next() {
@@ -505,10 +578,10 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>, workers: u64) {
                                     let ip_addr = ip_header.get_destination();
                                     if ip_addr == lb.listen_ip {
                                         let mut thread_lb = lb.clone();
-                                        let thread_tx = threads_tx.clone();
-                                        let thread_sender = sender.clone();
+                                        let thread_tx = channel_tx.clone();
+                                        //let thread_sender = sender.clone();
                                         tpool.execute(move|| {
-                                            process_packets(&mut thread_lb, ip_header, thread_tx, thread_sender);
+                                            process_packets(&mut thread_lb, ip_header, thread_tx);
                                         });
                                     }
                                 },

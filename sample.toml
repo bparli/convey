@@ -14,6 +14,9 @@ backend = "tcp3000_out"
     [backends.tcp3000_out.servers.server3]
     addr = "192.168.1.128:8084"
     weight = 1
+    [backends.tcp3000_out.servers.server4]
+    addr = "192.168.1.184:8080"
+    weight = 1
 
 [backends.tcp3001_out]
   health_check_interval = 3
@@ -29,3 +32,4 @@ port = "7000"
 
 [passthrough]
 connection_tracker_capacity = 3
+worker = 6

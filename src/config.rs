@@ -49,6 +49,8 @@ pub struct ServerConfig {
 #[derive(Debug, Deserialize, Default, Clone, Copy)]
 pub struct Passthrough {
     pub connection_tracker_capacity: usize,
+    pub workers: Option<usize>,
+    pub dsr: Option<bool>,
 }
 
 #[derive(Debug)]
