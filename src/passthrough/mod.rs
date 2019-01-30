@@ -488,7 +488,7 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
     loop {
         match rx.recv() {
             Ok(ethernet) => {
-                match Ipv4Packet::owned(ethernet.payload().iter().cloned().collect()) {
+                match Ipv4Packet::new(ethernet.payload()) {
                     Some(ip_header) => {
                         let ip_addr = ip_header.get_destination();
                         if ip_addr == lb.listen_ip {
@@ -558,7 +558,7 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
         match rx.next() {
             Ok(packet) => {
                 if !interface.is_loopback() {
-                    let ethernet = EthernetPacket::owned(packet.iter().cloned().collect()).unwrap();
+                    let ethernet = EthernetPacket::owned(packet.to_owned()).unwrap();
                     match ethernet.get_ethertype() {
                         EtherTypes::Ipv4 => {
                             match channel_tx.send(ethernet) {
