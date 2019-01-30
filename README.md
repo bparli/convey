@@ -26,8 +26,20 @@ Options:
 
 ### Passthrough mode
 
-`sudo iptables -t raw -A PREROUTING -p tcp --sport 8080 --dport 32768:61000 -j DROP`
-`sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST --dport 8000:8090 -j DROP`
+```
+For passthrough and dsr
+sudo iptables -t raw -A PREROUTING -p tcp --sport 8080 --dport 32768:61000 -j DROP
+
+Only for passthrough
+sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST --dport 8000:8090 -j DROP
+
+Required on backend servers for dsr to work
+sudo tc qdisc add dev enp0s8 root handle 10: htb
+
+sudo tc filter add dev enp0s8 parent 10: protocol ip prio 1 u32 match ip src 192.168.1.117 match ip sport 3000 0xffff match ip dst 192.168.1.136 action ok
+
+sudo tc filter add dev enp0s8 parent 10: protocol ip prio 10 u32 match ip src 192.168.1.117 match ip sport 3000 0xffff action nat egress 192.168.1.117 192.168.1.136
+```
 
 <!-- references -->
 [tokio]: https://tokio.rs

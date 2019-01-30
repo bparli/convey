@@ -244,6 +244,7 @@ impl LB {
 
                 match tx.send_to(new_ipv4, client_addr.ip()) {
                     Ok(n) => {
+                        debug!("Sent {} bytes to Client", n);
                         // update stats connections
                         let mut mssg = StatsMssg{frontend: Some(self.name.clone()),
                                             backend: self.backend.name.clone(),
@@ -311,13 +312,15 @@ impl LB {
                 IpAddr::V4(node_ipv4) => {
                     let fwd_ipv4 = node_ipv4.clone();
                     if self.backend.get_server_health(conn.backend_srv.clone()) {
+                        new_tcp.set_destination(conn.backend_srv.port);
+
                         // leave original tcp source if dsr
                         if !self.dsr {
                             new_tcp.set_source(conn.ephem_port);
+                            new_tcp.set_checksum(tcp::ipv4_checksum(&new_tcp.to_immutable(), &self.listen_ip, &fwd_ipv4));
+                        } else {
+                            new_tcp.set_checksum(tcp::ipv4_checksum(&new_tcp.to_immutable(), &ip_header.get_source(), &fwd_ipv4));
                         }
-
-                        new_tcp.set_destination(conn.backend_srv.port);
-                        new_tcp.set_checksum(tcp::ipv4_checksum(&new_tcp.to_immutable(), &self.listen_ip, &fwd_ipv4));
 
                         new_ipv4.set_payload(&new_tcp.packet());
                         new_ipv4.set_destination(fwd_ipv4);
@@ -362,6 +365,7 @@ impl LB {
             match node.host {
                 IpAddr::V4(node_ipv4) => {
                     let fwd_ipv4 = node_ipv4.clone();
+                    new_tcp.set_destination(node.port);
 
                     // leave original tcp source if dsr
                     let mut ephem_port = 0 as u16;
@@ -373,10 +377,10 @@ impl LB {
                             self.port_mapper.lock().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: tcp_header.get_source()});
                         }
                         new_tcp.set_source(ephem_port);
+                        new_tcp.set_checksum(tcp::ipv4_checksum(&new_tcp.to_immutable(), &self.listen_ip, &fwd_ipv4));
+                    } else {
+                        new_tcp.set_checksum(tcp::ipv4_checksum(&new_tcp.to_immutable(), &ip_header.get_source(), &fwd_ipv4));
                     }
-
-                    new_tcp.set_destination(node.port);
-                    new_tcp.set_checksum(tcp::ipv4_checksum(&new_tcp.to_immutable(), &self.listen_ip, &fwd_ipv4));
 
                     new_ipv4.set_payload(&new_tcp.packet());
                     new_ipv4.set_destination(fwd_ipv4);
@@ -434,9 +438,13 @@ impl LB {
                 Ok(n) => debug!("Sent {} bytes to Client", n),
                 Err(e) => error!("failed to send packet: {}", e),
             }
+            let mut connections = 0;
+            if !self.dsr {
+                connections = -1;
+            }
             let mssg = StatsMssg{frontend: Some(self.name.clone()),
                                 backend: self.backend.name.clone(),
-                                connections: -1,
+                                connections: connections,
                                 bytes_tx: 0,
                                 bytes_rx: 0,
                                 servers: None};
@@ -480,7 +488,7 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
     loop {
         match rx.recv() {
             Ok(ethernet) => {
-                match Ipv4Packet::new(ethernet.payload()) {
+                match Ipv4Packet::owned(ethernet.payload().iter().cloned().collect()) {
                     Some(ip_header) => {
                         let ip_addr = ip_header.get_destination();
                         if ip_addr == lb.listen_ip {
