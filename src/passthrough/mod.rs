@@ -30,6 +30,7 @@ use tokio::timer::Interval;
 use std::time::{Duration, Instant};
 use futures::future::lazy;
 use crossbeam_channel::unbounded;
+use std::sync::mpsc::channel;
 
 const IPV4_HEADER_LEN: usize = 20;
 const EPHEMERAL_PORT_LOWER: u16 = 32768;
@@ -50,32 +51,61 @@ struct Client {
 
 #[derive(Clone, Debug)]
 struct Connection {
+    // Client tcp address
     client: SocketAddr,
+
+    // backend server the client was scheduled to.  Tracked for future packets
     backend_srv: Node,
+
+    // Unique port assigned to this connection.  Used for mapping responses from
+    // backend servers to this client address
     ephem_port: u16,
 }
 
+// LB represents a single loadbalancer function, listening for an Address
+// and scheduling packets on a pool of backend servers
 #[derive(Clone)]
 pub struct LB {
+    // Loadbalancer name.  Maps to frontend name in the config
     name: String,
 
+    // Ipv4 Address this loadbalancer listens for
     listen_ip: Ipv4Addr,
 
+    // Port this loadbalancer listens for
     listen_port: u16,
 
+    // The backend server logic
     backend: Arc<Backend>,
 
+    // Connection tracker for bookeeping of client connections.
+    // very basic right now, just used for mapping backend servers to clients
     conn_tracker: Arc<Mutex<LruCache<Client, Connection>>>,
 
+    // Port mapper for quickly looking up the client address based on
+    // the port a backend server sent a response to.
+    // Only used in Passthrough mode without DSR (so bidirectional)
+    // Since DSR bypasses coming back through the loadbalancer this data structure
+    // isn't needed in Passthrough DSR mode
     port_mapper: Arc<Mutex<HashMap<u16, Client>>>,
 
+    // Keeping track of the next port to assign for client -> backend server mappings
     next_port: Arc<Mutex<u16>>,
 
+    // Number of worker threads to spawn
     workers: usize,
 
-    dsr: bool
+    // Flag indicating whether we are operating in Passthrough DSR mode (server response bypasses the loadbalancer)
+    // or in plain Passthrough mode (server repsonse returns through the loadbalancer and the loadbalancer
+    // sends back to client).
+    // False by default (so plain Passthrough/bidirectional)
+    dsr: bool,
+
+    // How often to update the stats/counters.  5 seconds by default
+    stats_update_frequency: u64,
 }
 
+// Server is the overarching type, comprised of at least one loadbalancer
 impl Server {
     pub fn new(config: Config) -> Server {
         let mut new_server = Server {lbs: Vec::new()};
@@ -87,6 +117,7 @@ impl Server {
             let mut connection_tracker_capacity = 1000 as usize;
             let mut workers = 4 as usize;
             let mut dsr = false;
+            let mut stats_update_frequency = 5;
 
             match config.base.passthrough {
                 Some(setting) => {
@@ -96,6 +127,9 @@ impl Server {
                     }
                     if let Some(flag) = setting.dsr {
                         dsr = flag;
+                    }
+                    if let Some(freq) = setting.stats_update_frequency {
+                        stats_update_frequency = freq;
                     }
                 },
                 None => {},
@@ -136,6 +170,7 @@ impl Server {
                             next_port: Arc::new(Mutex::new(EPHEMERAL_PORT_LOWER)),
                             workers: workers,
                             dsr: dsr,
+                            stats_update_frequency: stats_update_frequency,
                         };
                         new_server.lbs.push(new_lb);
                     }
@@ -210,17 +245,25 @@ impl LB {
         *port
     }
 
-    fn server_response_handler(&mut self, ip_header: &Ipv4Packet, client_addr: &SocketAddr, tx: &mut TransportSender, sender: Sender<StatsMssg>) {
+    // handle repsonse packets from a backend server passing back through the loadbalancer
+    fn server_response_handler(&mut self, ip_header: &Ipv4Packet, client_addr: &SocketAddr, tx: &mut TransportSender) -> Option<StatsMssg> {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
                 error!("Unable to decapsulate tcp header");
-                return
+                return None
             }
         };
 
         match client_addr.ip() {
             IpAddr::V4(client_ipv4) => {
+                let mut mssg = StatsMssg{frontend: None,
+                                    backend: self.backend.name.clone(),
+                                    connections: 0,
+                                    bytes_tx: 0,
+                                    bytes_rx: 0,
+                                    servers: None};
+
                 let mut vec: Vec<u8> = vec![0; tcp_header.packet().len()];
                 let mut new_tcp = MutableTcpPacket::new(&mut vec[..]).unwrap();
                 new_tcp.clone_from(&tcp_header);
@@ -246,38 +289,39 @@ impl LB {
                     Ok(n) => {
                         debug!("Sent {} bytes to Client", n);
                         // update stats connections
-                        let mut mssg = StatsMssg{frontend: Some(self.name.clone()),
-                                            backend: self.backend.name.clone(),
-                                            connections: 0,
-                                            bytes_tx: 0,
-                                            bytes_rx:  n as u64,
-                                            servers: None};
+                        mssg.bytes_rx = n as u64;
                         match tcp_header.get_flags() {
                             0b000010010 => mssg.connections = 1, // add a connection to count on SYN,ACK
                             0b000010001 => mssg.connections = -1, // sub a connection to count on FIN,ACK
                             _ => {},
                         }
-
-                        match sender.send(mssg) {
-                            Ok(_) => {},
-                            Err(e) => error!("Error sending stats message on channel: {}", e)
-                        }
+                        return Some(mssg)
                     }
-                    Err(e) => debug!("failed to send packet to {:?}: Error: {}", client_addr, e),
+                    Err(e) => error!("failed to send packet to {:?}: Error: {}", client_addr, e),
                 }
             }
             _ => {} // ipv6 not supported (yet)
         }
+        return None
     }
 
-    fn client_handler(&mut self, ip_header: &Ipv4Packet, tx: &mut TransportSender, sender: Sender<StatsMssg>) {
+    // handle requests packets from a client
+    fn client_handler(&mut self, ip_header: &Ipv4Packet, tx: &mut TransportSender) -> Option<StatsMssg> {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
                 error!("Unable to decapsulate tcp header");
-                return
+                return None
             }
         };
+
+        // setup stats update return
+        let mut mssg = StatsMssg{frontend: None,
+                            backend: self.backend.name.clone(),
+                            connections: 0,
+                            bytes_tx: 0,
+                            bytes_rx: 0,
+                            servers: None};
 
         // setup forwarding packet
         let mut vec: Vec<u8> = vec![0; tcp_header.packet().len()];
@@ -329,20 +373,11 @@ impl LB {
                         match tx.send_to(new_ipv4, conn.backend_srv.host.clone()) {
                             Ok(n) => {
                                 debug!("Sent {} bytes to Server", n);
-                                let mssg = StatsMssg{frontend: Some(self.name.clone()),
-                                                    backend: self.backend.name.clone(),
-                                                    connections: 0,
-                                                    bytes_tx: n as u64,
-                                                    bytes_rx: 0,
-                                                    servers: None};
-                                match sender.send(mssg) {
-                                    Ok(_) => {},
-                                    Err(e) => error!("Error sending stats message on channel: {}", e)
-                                }
+                                mssg.bytes_tx = n as u64;
                             },
                             Err(e) => error!("failed to send packet: {}", e),
                         }
-                        return
+                        return Some(mssg)
                     } else {
                         debug!("Backend sever {:?} is no longer healthy.  Rescheduling", conn.backend_srv);
                         // backend server is unhealthy, remove connection from map
@@ -350,7 +385,7 @@ impl LB {
                         cli_unhealthy = true;
                     }
                 }
-                _ => {}
+                _ => { return None }
             }
         }
 
@@ -389,18 +424,9 @@ impl LB {
                     match tx.send_to(new_ipv4, node.host.clone()) {
                         Ok(n) => {
                             debug!("Sent {} bytes to Server", n);
-                            let mssg = StatsMssg{frontend: Some(self.name.clone()),
-                                                backend: self.backend.name.clone(),
-                                                connections: 0,
-                                                bytes_tx: n as u64,
-                                                bytes_rx: 0,
-                                                servers: None};
-                            match sender.send(mssg) {
-                                Ok(_) => {},
-                                Err(e) => error!("Error sending stats message on channel: {}", e)
-                            }
+                            mssg.bytes_tx = n as u64;
                         }
-                        Err(e) => debug!("failed to send packet: {}", e),
+                        Err(e) => error!("failed to send packet: {}", e),
                     }
 
                     // not already tracking the connection so insert into our maps
@@ -410,8 +436,9 @@ impl LB {
                         ephem_port: ephem_port,
                     };
                     self.conn_tracker.lock().unwrap().insert(cli, conn);
+                    return Some(mssg)
                 }
-                _ => {}
+                _ => { return None }
             }
         } else {
             error!("Unable to find backend");
@@ -442,16 +469,8 @@ impl LB {
             if !self.dsr {
                 connections = -1;
             }
-            let mssg = StatsMssg{frontend: Some(self.name.clone()),
-                                backend: self.backend.name.clone(),
-                                connections: connections,
-                                bytes_tx: 0,
-                                bytes_rx: 0,
-                                servers: None};
-            match sender.send(mssg) {
-                Ok(_) => {},
-                Err(e) => error!("Error sending stats message on channel: {}", e)
-            }
+            mssg.connections = connections;
+            return Some(mssg)
         }
     }
 
@@ -475,6 +494,7 @@ fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
     return None
 }
 
+// worker thread
 fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>, sender: Sender<StatsMssg>) {
     let tx_protocol = Layer3(IpNextHeaderProtocols::Tcp);
     let (mut tx, _) = match transport_channel(4096, tx_protocol) {
@@ -484,6 +504,23 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
             return
         },
     };
+
+    let mut stats = StatsMssg{frontend: Some(lb.name.clone()),
+                        backend: lb.backend.name.clone(),
+                        connections: 0,
+                        bytes_tx: 0,
+                        bytes_rx: 0,
+                        servers: None};
+
+    // Spawn timer for sending stats updates
+    let (stats_tx, stats_rx) = channel();
+    let freq = lb.stats_update_frequency;
+    thread::spawn(move || {
+        loop {
+            stats_tx.send("tick").unwrap();
+            thread::sleep(Duration::from_secs(freq));
+        }
+    });
 
     loop {
         match rx.recv() {
@@ -495,13 +532,36 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
                             match TcpPacket::new(ip_header.payload()) {
                                 Some(tcp_header) => {
                                     if tcp_header.get_destination() == lb.listen_port {
-                                        lb.client_handler(&ip_header, &mut tx, sender.clone());
+                                        if let Some(stats_update) = lb.client_handler(&ip_header, &mut tx) {
+                                            stats.connections += &stats_update.connections;
+                                            stats.bytes_rx += &stats_update.bytes_rx;
+                                            stats.bytes_tx += &stats_update.bytes_tx;
+                                        };
                                     } else if !lb.dsr {
                                         // only handling server repsonses if not using dsr
                                         if let Some(client_addr) = lb.port_mapper.lock().unwrap().get_mut(&tcp_header.get_destination()) {
                                             // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
-                                            lb.clone().server_response_handler(&ip_header, &SocketAddr::new( client_addr.ip, client_addr.port), &mut tx, sender.clone());
+                                            if let Some(stats_update) = lb.clone().server_response_handler(&ip_header, &SocketAddr::new( client_addr.ip, client_addr.port), &mut tx) {
+                                                stats.connections += &stats_update.connections;
+                                                stats.bytes_rx += &stats_update.bytes_rx;
+                                                stats.bytes_tx += &stats_update.bytes_tx;
+                                            };
                                         }
+                                    }
+                                    match stats_rx.try_recv() {
+                                        Ok(_) => {
+                                            // send the counters we've gathered in this time period
+                                            debug!("Timer fired, sending stats counters");
+                                            match sender.send(stats.clone()) {
+                                                Ok(_) => {},
+                                                Err(e) => error!("Error sending stats message on channel: {}", e)
+                                            }
+                                            // zero out counters for next time period
+                                            stats.connections = 0;
+                                            stats.bytes_rx = 0;
+                                            stats.bytes_tx = 0;
+                                        }
+                                        Err(_) => {},
                                     }
                                 },
                                 None => {},
