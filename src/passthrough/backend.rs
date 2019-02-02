@@ -1,14 +1,13 @@
 extern crate futures;
 extern crate hash_ring;
 
-use std::net::SocketAddr;
 use std::collections::HashMap;
-use std::net::TcpStream;
 use std::sync::{Arc, RwLock, Mutex};
 use crate::stats::StatsMssg;
 use std::sync::mpsc::{Sender};
-use std::net::{IpAddr};
+use std::net::{TcpStream, IpAddr, SocketAddr};
 use hash_ring::HashRing;
+use std::time;
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -126,7 +125,7 @@ impl ServerPool {
 }
 
 fn tcp_health_check(server: SocketAddr) -> bool {
-    if let Ok(_) = TcpStream::connect(server) {
+    if let Ok(_) = TcpStream::connect_timeout(&server, time::Duration::from_secs(3)) {
         true
     } else {
         false
@@ -213,11 +212,6 @@ mod tests {
     #[test]
     fn test_backend_get_server_pt() {
         // setup iptables for passthrough mode (iptables -t raw -A PREROUTING -p tcp --dport 3000 -j DROP)
-        let iptables = Command::new("/sbin/iptables")
-                     .args(&["-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", "3000", "-j", "DROP"])
-                     .status()
-                     .unwrap();
-        assert!(iptables.success());
 
         thread::spawn( ||{
             let listener = TcpListener::bind("127.0.0.1:9090").unwrap();
@@ -258,11 +252,6 @@ mod tests {
         }
 
         // Flush iptables
-        let iptables = Command::new("/sbin/iptables")
-                     .args(&["-t", "raw", "-F"])
-                     .status()
-                     .unwrap();
-        assert!(iptables.success());
     }
 
     #[test]

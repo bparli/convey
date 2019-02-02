@@ -15,9 +15,11 @@ use pnet::packet::{tcp};
 use pnet::packet::ipv4::{checksum, Ipv4Packet, MutableIpv4Packet};
 use pnet::packet::{MutablePacket, Packet};
 use std::net::{IpAddr, Ipv4Addr};
-use pnet::datalink::{self, NetworkInterface};
+use pnet::datalink::{self, NetworkInterface, MacAddr};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::datalink::Channel::Ethernet;
+use pnet::packet::ethernet::{MutableEthernetPacket};
+
 use std::sync::{Arc, Mutex};
 use std::net::{SocketAddr};
 use std::str::FromStr;
@@ -33,6 +35,7 @@ use crossbeam_channel::unbounded;
 use std::sync::mpsc::channel;
 
 const IPV4_HEADER_LEN: usize = 20;
+const ETHERNET_HEADER_LEN: usize = 14;
 const EPHEMERAL_PORT_LOWER: u16 = 32768;
 const EPHEMERAL_PORT_UPPER: u16 = 61000;
 
@@ -152,6 +155,7 @@ impl Server {
                     continue
                 },
             };
+
             if backend_servers.len() > 0 {
                 let listen_addr: SocketAddr = FromStr::from_str(&front.listen_addr)
                                   .ok()
@@ -180,7 +184,6 @@ impl Server {
                 error!("Unable to configure load balancer server {:?}", front);
             }
         }
-
         let rx = config.subscribe();
         new_server.config_sync(rx);
         new_server
@@ -246,7 +249,7 @@ impl LB {
     }
 
     // handle repsonse packets from a backend server passing back through the loadbalancer
-    fn server_response_handler(&mut self, ip_header: &Ipv4Packet, client_addr: &SocketAddr, tx: &mut TransportSender) -> Option<StatsMssg> {
+    fn server_response_handler(&mut self, ip_header: &Ipv4Packet, client_addr: &SocketAddr, tx: Sender<MutableIpv4Packet>) -> Option<StatsMssg> {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
@@ -268,8 +271,8 @@ impl LB {
                 let mut new_tcp = MutableTcpPacket::new(&mut vec[..]).unwrap();
                 new_tcp.clone_from(&tcp_header);
 
-                let mut ipbuf = vec!(0; new_tcp.packet().len() + IPV4_HEADER_LEN);
-                let mut new_ipv4 = MutableIpv4Packet::new(&mut ipbuf).unwrap();
+                let ipbuf: Vec<u8> = vec!(0; new_tcp.packet().len() + IPV4_HEADER_LEN);
+                let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
                 new_ipv4.clone_from(ip_header);
                 new_tcp.set_destination(client_addr.port());
                 new_tcp.set_source(self.listen_port);
@@ -284,12 +287,11 @@ impl LB {
                 new_ipv4.set_source(self.listen_ip);
                 new_ipv4.set_header_length(5);
                 new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
+                mssg.bytes_tx = new_tcp.payload().len() as u64;
 
-                match tx.send_to(new_ipv4, client_addr.ip()) {
+                match tx.send(new_ipv4) {
                     Ok(n) => {
-                        debug!("Sent {} bytes to Client", n);
-                        // update stats connections
-                        mssg.bytes_rx = n as u64;
+                        debug!("Client handler sent {:?} packet to outgoing interface handler thread", n);
                         match tcp_header.get_flags() {
                             0b000010010 => mssg.connections = 1, // add a connection to count on SYN,ACK
                             0b000010001 => mssg.connections = -1, // sub a connection to count on FIN,ACK
@@ -306,7 +308,7 @@ impl LB {
     }
 
     // handle requests packets from a client
-    fn client_handler(&mut self, ip_header: &Ipv4Packet, tx: &mut TransportSender) -> Option<StatsMssg> {
+    fn client_handler(&mut self, ip_header: &Ipv4Packet, tx: Sender<MutableIpv4Packet>) -> Option<StatsMssg> {
         let tcp_header = match TcpPacket::new(ip_header.payload()) {
             Some(tcp_header) => tcp_header,
             None => {
@@ -327,8 +329,10 @@ impl LB {
         let mut vec: Vec<u8> = vec![0; tcp_header.packet().len()];
         let mut new_tcp = MutableTcpPacket::new(&mut vec[..]).unwrap();
         new_tcp.clone_from(&tcp_header);
-        let mut ipbuf = vec!(0; tcp_header.packet().len() + IPV4_HEADER_LEN);
-        let mut new_ipv4 = MutableIpv4Packet::new(&mut ipbuf).unwrap();
+
+        let ipbuf: Vec<u8> = vec!(0; new_tcp.packet().len() + IPV4_HEADER_LEN);
+        let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
+
         new_ipv4.clone_from(ip_header);
         new_ipv4.set_total_length(tcp_header.packet().len() as u16 + IPV4_HEADER_LEN as u16);
         new_ipv4.set_version(4);
@@ -369,11 +373,11 @@ impl LB {
                         new_ipv4.set_payload(&new_tcp.packet());
                         new_ipv4.set_destination(fwd_ipv4);
                         new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
+                        mssg.bytes_tx = new_tcp.payload().len() as u64;
 
-                        match tx.send_to(new_ipv4, conn.backend_srv.host.clone()) {
+                        match tx.send(new_ipv4) {
                             Ok(n) => {
-                                debug!("Sent {} bytes to Server", n);
-                                mssg.bytes_tx = n as u64;
+                                debug!("Client handler sent {:?} packet to outgoing interface handler thread", n);
                             },
                             Err(e) => error!("failed to send packet: {}", e),
                         }
@@ -420,11 +424,11 @@ impl LB {
                     new_ipv4.set_payload(&new_tcp.packet());
                     new_ipv4.set_destination(fwd_ipv4);
                     new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
+                    mssg.bytes_tx = new_tcp.payload().len() as u64;
 
-                    match tx.send_to(new_ipv4, node.host.clone()) {
+                    match tx.send(new_ipv4) {
                         Ok(n) => {
-                            debug!("Sent {} bytes to Server", n);
-                            mssg.bytes_tx = n as u64;
+                            debug!("Client handler sent {:?} packet to outgoing interface handler thread", n);
                         }
                         Err(e) => error!("failed to send packet: {}", e),
                     }
@@ -461,8 +465,8 @@ impl LB {
             new_ipv4.set_destination(ip_header.get_source());
             new_ipv4.set_checksum(checksum(&new_ipv4.to_immutable()));
 
-            match tx.send_to(new_ipv4, cli.ip) {
-                Ok(n) => debug!("Sent {} bytes to Client", n),
+            match tx.send(new_ipv4) {
+                Ok(n) => debug!("Client handler sent {:?} packet to outgoing interface handler thread", n),
                 Err(e) => error!("failed to send packet: {}", e),
             }
             let mut connections = 0;
@@ -495,16 +499,7 @@ fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
 }
 
 // worker thread
-fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>, sender: Sender<StatsMssg>) {
-    let tx_protocol = Layer3(IpNextHeaderProtocols::Tcp);
-    let (mut tx, _) = match transport_channel(4096, tx_protocol) {
-        Ok((tx, rx)) => (tx, rx),
-        Err(e) => {
-            error!("Error setting up TCP transport channel {}", e);
-            return
-        },
-    };
-
+fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>, tx: Sender<MutableIpv4Packet>, sender: Sender<StatsMssg>) {
     let mut stats = StatsMssg{frontend: Some(lb.name.clone()),
                         backend: lb.backend.name.clone(),
                         connections: 0,
@@ -522,6 +517,7 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
         }
     });
 
+    let loop_tx = tx.clone();
     loop {
         match rx.recv() {
             Ok(ethernet) => {
@@ -532,7 +528,7 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
                             match TcpPacket::new(ip_header.payload()) {
                                 Some(tcp_header) => {
                                     if tcp_header.get_destination() == lb.listen_port {
-                                        if let Some(stats_update) = lb.client_handler(&ip_header, &mut tx) {
+                                        if let Some(stats_update) = lb.client_handler(&ip_header, loop_tx.clone()) {
                                             stats.connections += &stats_update.connections;
                                             stats.bytes_rx += &stats_update.bytes_rx;
                                             stats.bytes_tx += &stats_update.bytes_tx;
@@ -541,7 +537,7 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
                                         // only handling server repsonses if not using dsr
                                         if let Some(client_addr) = lb.port_mapper.lock().unwrap().get_mut(&tcp_header.get_destination()) {
                                             // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
-                                            if let Some(stats_update) = lb.clone().server_response_handler(&ip_header, &SocketAddr::new( client_addr.ip, client_addr.port), &mut tx) {
+                                            if let Some(stats_update) = lb.clone().server_response_handler(&ip_header, &SocketAddr::new( client_addr.ip, client_addr.port), loop_tx.clone()) {
                                                 stats.connections += &stats_update.connections;
                                                 stats.bytes_rx += &stats_update.bytes_rx;
                                                 stats.bytes_tx += &stats_update.bytes_tx;
@@ -585,10 +581,13 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
     thread::spawn( move || {
         sched_health_checks(backend, health_sender);
     });
-
     let interface = match find_interface(lb.listen_ip) {
         Some(interface) => {
-            info!("Listening on interface {}", interface);
+            if interface.is_loopback() {
+                error!("Supplied address is on a loopback interface");
+                return
+            }
+            println!("Listening on interface {}", interface);
             interface
         }
         None => {
@@ -598,36 +597,68 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
     };
 
     // Create a new channel, dealing with layer 2 packets
-    let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
+    let (mut iface_tx, mut iface_rx) = match datalink::channel(&interface, Default::default()) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Unhandled channel type"),
         Err(e) => panic!("An error occurred when creating the datalink channel: {}", e)
     };
 
-    let (channel_tx, channel_rx) = unbounded();
+    // multi producer / multi receiver channel for main thread to distribute
+    // incoming ethernet packets to multiple workers
+    let (incoming_tx, incoming_rx) = unbounded();
+
+    let (outgoing_tx, outgoing_rx) = channel();
+    // multi producer / single receiver channel for worker threads to
+    // send outgoing ethernet packets
+
     for _ in 0..lb.workers {
         let mut thread_lb = lb.clone();
-        let thread_rx = channel_rx.clone();
+        let thread_rx = incoming_rx.clone();
+        let thread_tx = outgoing_tx.clone();
         let thread_sender = sender.clone();
         thread::spawn(move || {
-            process_packets(&mut thread_lb, thread_rx, thread_sender)
+            process_packets(&mut thread_lb, thread_rx, thread_tx, thread_sender)
         });
     }
 
-    loop {
-        match rx.next() {
-            Ok(packet) => {
-                if !interface.is_loopback() {
-                    let ethernet = EthernetPacket::owned(packet.to_owned()).unwrap();
-                    match ethernet.get_ethertype() {
-                        EtherTypes::Ipv4 => {
-                            match channel_tx.send(ethernet) {
-                                Ok(_) => {},
-                                Err(e) => error!("Error sending ethernet packet to worker on channel {}", e)
-                            }
-                        }
-                        _ => {}
+    // tx thread for sending processed packets back out
+    thread::spawn(move || {
+        let tx_protocol = Layer3(IpNextHeaderProtocols::Tcp);
+        let (mut tx, _) = match transport_channel(4096, tx_protocol) {
+            Ok((tx, rx)) => (tx, rx),
+            Err(e) => {
+                error!("Error setting up TCP transport channel {}", e);
+                return
+            },
+        };
+        loop {
+            match outgoing_rx.recv() {
+                Ok(ip_header) => {
+                    let dst = IpAddr::V4(ip_header.get_destination());
+                    match tx.send_to(ip_header, dst) {
+                       Ok(n) => {
+                           debug!("Sent {} bytes to Server", n);
+                       },
+                       Err(e) => error!("failed to send packet: {}", e),
                     }
+                }
+                Err(e) => error!("Error processing outgoing packet {:?}", e),
+            }
+        }
+    });
+
+    loop {
+        match iface_rx.next() {
+            Ok(packet) => {
+                let ethernet = EthernetPacket::owned(packet.to_owned()).unwrap();
+                match ethernet.get_ethertype() {
+                    EtherTypes::Ipv4 => {
+                        match incoming_tx.send(ethernet) {
+                            Ok(_) => {},
+                            Err(e) => error!("Error sending ethernet packet to worker on channel {}", e)
+                        }
+                    }
+                    _ => {}
                 }
             }
             Err(e) => {
@@ -652,4 +683,125 @@ fn sched_health_checks(backend: Arc<Backend>, sender: Sender<StatsMssg>) {
         tokio::spawn(task);
         Ok(())
     }));
+}
+
+
+#[cfg(test)]
+mod tests {
+    extern crate hyper;
+    use std::sync::mpsc::channel;
+    use std::thread;
+    use crate::config::{Config};
+    use crate::passthrough;
+    use crate::stats;
+    use hyper::{Body, Request, Response, Server};
+    use hyper::service::service_fn_ok;
+    use hyper::rt::{self, Future};
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::{time};
+
+    fn update_config(filename: &str, word_from: String, word_to: String) {
+        let mut src = File::open(&filename).unwrap();
+        let mut data = String::new();
+        src.read_to_string(&mut data).unwrap();
+        drop(src);  // Close the file early
+
+        // Run the replace operation in memory
+        let new_data = data.replace(&*word_from, &*word_to);
+
+        // Recreate the file and dump the processed contents to it
+        let mut dst = File::create(&filename).unwrap();
+        dst.write(new_data.as_bytes()).unwrap();
+    }
+
+    fn find_test_ip() -> Option<String> {
+        for iface in pnet::datalink::interfaces() {
+            if !iface.is_loopback() {
+                for ipnet in iface.ips {
+                    if ipnet.is_ipv4() {
+                        return Some(ipnet.ip().to_string());
+                    }
+                }
+            }
+        }
+        return None;
+    }
+
+    #[test]
+    fn test_passthrough() {
+        // setup iptables for passthrough mode (iptables -t raw -A PREROUTING -p tcp --dport 3000 -j DROP)
+
+        let test_ip = find_test_ip().unwrap();
+        update_config("testdata/passthrough_test.toml", "127.0.0.1:3080".to_string(), format!("{}{}", test_ip.clone(), ":3080"));
+        update_config("testdata/passthrough_test.toml", "127.0.0.1:3081".to_string(), format!("{}{}", test_ip.clone(), ":3081"));
+
+        let thread_ip = test_ip.clone();
+        thread::spawn( move ||{
+            let addr = format!("{}{}", "127.0.0.1", ":3080").parse().unwrap();
+            let server = Server::bind(&addr)
+            .serve(|| {
+                service_fn_ok(move |_: Request<Body>| {
+                    Response::new(Body::from("Success DummyA Server"))
+                })
+            })
+            .map_err(|e| eprintln!("server error: {}", e));
+            rt::run(server);
+        });
+
+        let mut conf = Config::new("testdata/passthrough_test.toml").unwrap();
+        conf.base.frontends.get_mut("tcp_3000").unwrap().listen_addr = format!("{}{}", "127.0.0.1", ":3000");
+
+        let lb = passthrough::Server::new(conf);
+        //TODO: verify messages sent over channel to stats endpoint from proxy
+        let (tx, _) = channel();
+
+        thread::spawn( ||{
+            lb.run(tx);
+        });
+
+        let two_secs = time::Duration::from_secs(2);
+        thread::sleep(two_secs);
+        let curl_req = format!("{}{}{}", "http://", "127.0.0.1", ":3000");
+        // validate scheduling
+        for _ in 0..10 {
+            let mut resp = reqwest::get(curl_req.as_str()).unwrap();
+            assert_eq!(resp.status(), 200);
+            assert!(resp.text().unwrap().contains("DummyA"));
+        }
+
+        // update config to take DummyA out of service
+        update_config("testdata/passthrough_test.toml", format!("{}{}", "127.0.0.1", ":3080"), format!("{}{}", "127.0.0.1", ":3083"));
+        thread::sleep(two_secs);
+
+        // start dummyB server
+        //let thread_ip = test_ip.clone();
+        thread::spawn(move ||{
+            let addr = format!("{}{}", "127.0.0.1", ":3081").parse().unwrap();
+            let server = Server::bind(&addr)
+            .serve(|| {
+                service_fn_ok(move |_: Request<Body>| {
+                    Response::new(Body::from("Success DummyB Server"))
+                })
+            })
+            .map_err(|e| eprintln!("server error: {}", e));
+            rt::run(server);
+        });
+
+        let two_secs = time::Duration::from_secs(2);
+        thread::sleep(two_secs);
+
+        // validate only DummyB is serving requests now that DummyA has been taken out of service
+        for _ in 0..10 {
+            let mut resp = reqwest::get(curl_req.as_str()).unwrap();
+            assert_eq!(resp.status(), 200);
+            assert!(resp.text().unwrap().contains("DummyB"));
+        }
+
+        // reset fixture
+
+        // update_config("testdata/passthrough_test.toml", format!("{}{}", test_ip.clone(), ":3083"), "127.0.0.1:3080".to_string());
+        // update_config("testdata/passthrough_test.toml", format!("{}{}", test_ip.clone(), ":3081"), "127.0.0.1:3081".to_string());
+        // Flush iptables
+    }
 }
