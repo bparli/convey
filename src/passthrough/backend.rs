@@ -51,7 +51,6 @@ impl Backend {
     }
 
     pub fn get_server(&self, ip_dst: IpAddr, port_dst: u16, ip_src: IpAddr, port_src: u16) -> Option<Node> {
-
         // Build "4-tuple of destination ip, destination port, source ip, source port
         // in form of str to feed to hashring"
         let mut tuple: String = ip_dst.to_string();
@@ -181,7 +180,6 @@ mod tests {
     use std::str::FromStr;
     use std::net::TcpListener;
     use std::{thread, time};
-    use std::process::Command;
 
     #[test]
     fn test_new_servers_pt() {

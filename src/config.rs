@@ -50,7 +50,6 @@ pub struct ServerConfig {
 pub struct Passthrough {
     pub connection_tracker_capacity: usize,
     pub workers: Option<usize>,
-    pub dsr: Option<bool>,
     pub stats_update_frequency: Option<u64>,
 }
 

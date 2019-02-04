@@ -20,8 +20,9 @@ Usage:
   convey
   convey --config=<config_file>
   convey (-p | --passthrough) --config=<config_file>
-  convey (-p | --passthrough) --config=<config_file>
+  convey (-d | --dsr) --config=<config_file>
   convey (-p | --passthrough)
+  convey (-d | --dsr)
   convey (-h | --help)
   convey (-v | --version)
 
@@ -53,7 +54,11 @@ fn main() {
             let stats_sender = stats::run(&config.base);
             if args.get_bool("--passthrough") {
                 debug!("Starting loadbalancer in passthrough mode");
-                let loadbalancer = passthrough::Server::new(config);
+                let loadbalancer = passthrough::Server::new(config, false);
+                loadbalancer.run(stats_sender);
+            } else if args.get_bool("--dsr") {
+                debug!("Starting loadbalancer in direct server return mode");
+                let loadbalancer = passthrough::Server::new(config, true);
                 loadbalancer.run(stats_sender);
             } else {
                 debug!("Starting loadbalancer in proxy mode");
