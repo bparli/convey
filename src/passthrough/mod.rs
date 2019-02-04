@@ -1,6 +1,5 @@
 extern crate pnet;
 extern crate pnet_macros_support;
-extern crate threadpool;
 extern crate lru_time_cache;
 
 use self::backend::{Backend, ServerPool, Node, health_checker};
@@ -304,6 +303,8 @@ impl LB {
             }
         };
 
+        let client_port = tcp_header.get_source();
+
         // setup stats update return
         let mut mssg = StatsMssg{frontend: None,
                             backend: self.backend.name.clone(),
@@ -330,7 +331,7 @@ impl LB {
         //check if we are already tracking this connection
         let cli = Client{
             ip: IpAddr::V4(ip_header.get_source()),
-            port: tcp_header.get_source(),
+            port: client_port,
         };
 
         // flag for removing client connection from connection tracker
@@ -393,9 +394,9 @@ impl LB {
                     if !self.dsr {
                         // set ephemeral port for tracking connections and in case of mutiple clients using same port
                         ephem_port = self.clone().next_avail_port();
-                        debug!("Using Ephemeral port {} for client connection {:?}", ephem_port, SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source()));
+                        debug!("Using Ephemeral port {} for client connection {:?}", ephem_port, SocketAddr::new(IpAddr::V4(ip_header.get_source()), client_port));
                         {
-                            self.port_mapper.lock().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: tcp_header.get_source()});
+                            self.port_mapper.lock().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: client_port});
                         }
                         tcp_header.set_source(ephem_port);
                         tcp_header.set_checksum(tcp::ipv4_checksum(&tcp_header.to_immutable(), &self.listen_ip, &fwd_ipv4));
@@ -417,7 +418,7 @@ impl LB {
 
                     // not already tracking the connection so insert into our maps
                     let conn = Connection {
-                        client: SocketAddr::new(IpAddr::V4(ip_header.get_source()), tcp_header.get_source()),
+                        client: SocketAddr::new(IpAddr::V4(ip_header.get_source()), client_port),
                         backend_srv: node,
                         ephem_port: ephem_port,
                     };
@@ -596,6 +597,7 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
     // multi producer / single receiver channel for worker threads to
     // send outgoing ethernet packets
 
+    // spawn the packet processing workers
     for _ in 0..lb.workers {
         let mut thread_lb = lb.clone();
         let thread_rx = incoming_rx.clone();
@@ -678,15 +680,18 @@ mod tests {
     use std::thread;
     use crate::config::{Config};
     use crate::passthrough;
-    use crate::stats;
     use hyper::{Body, Request, Response, Server};
     use hyper::service::service_fn_ok;
     use hyper::rt::{self, Future};
     use std::fs::File;
     use std::io::{Read, Write};
     use std::{time};
-    use std::net::{IpAddr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use self::passthrough::utils::{build_dummy_eth, build_dummy_ip};
+    use self::passthrough::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, Node};
+    use pnet::packet::tcp::{TcpPacket};
+    use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
+    use pnet::packet::Packet;
 
     fn update_config(filename: &str, word_from: String, word_to: String) {
         let mut src = File::open(&filename).unwrap();
@@ -767,5 +772,122 @@ mod tests {
 
         // reset fixture
         update_config("testdata/passthrough_test.toml", "6.6.6.6:3080".to_string(), "127.0.0.1:3080".to_string());
+    }
+
+    #[test]
+    fn test_passthrough_next_port() {
+        let conf = Config::new("testdata/passthrough_test.toml").unwrap();
+        let srv = passthrough::Server::new(conf, false);
+        let mut lb = srv.lbs[0].clone();
+
+        let first_port = lb.next_avail_port();
+        assert_eq!(*lb.next_port.lock().unwrap(), first_port);
+        assert_eq!(lb.next_avail_port(), first_port + 1);
+        *lb.next_port.lock().unwrap() = EPHEMERAL_PORT_UPPER + 1;
+        assert_eq!(lb.next_avail_port(), EPHEMERAL_PORT_LOWER);
+    }
+
+    #[test]
+    fn test_passthrough_server_response() {
+        let conf = Config::new("testdata/passthrough_test.toml").unwrap();
+        let srv = passthrough::Server::new(conf, false);
+        let mut lb = srv.lbs[0].clone();
+
+        let (tx, rx) = channel();
+        let dummy_ip = "127.0.0.1".parse().unwrap();
+        let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
+
+        let resp_header = build_dummy_ip(dummy_ip, dummy_ip, 80, 35000);
+        lb.server_response_handler(&mut resp_header.to_immutable(), &SocketAddr::new(IpAddr::V4("9.9.9.9".parse().unwrap()), 35000), tx);
+        let srv_resp: MutableIpv4Packet = rx.recv().unwrap();
+        assert_eq!(srv_resp.get_destination(), client_ip);
+        assert_eq!(srv_resp.get_source(), dummy_ip);
+
+        let tcp_resp = TcpPacket::new(srv_resp.payload()).unwrap();
+        assert_eq!(tcp_resp.get_destination(), 35000);
+        assert_eq!(tcp_resp.get_source(), 3000);
+
+    }
+
+    #[test]
+    fn test_passthrough_client() {
+        // start a backend server
+        thread::spawn( move ||{
+            let addr = format!("{}{}", "127.0.0.1", ":3080").parse().unwrap();
+            let server = Server::bind(&addr)
+            .serve(|| {
+                service_fn_ok(move |_: Request<Body>| {
+                    Response::new(Body::from("Success DummyA Server"))
+                })
+            })
+            .map_err(|e| eprintln!("server error: {}", e));
+            rt::run(server);
+        });
+
+        // load and run the loadbalancer
+        let conf = Config::new("testdata/passthrough_test.toml").unwrap();
+        let srv = passthrough::Server::new(conf, false);
+        let mut lb = srv.lbs[0].clone();
+
+        // gen test ip/tcp packet with simulated client
+        let (tx, rx) = channel();
+        let dummy_ip = "127.0.0.1".parse().unwrap();
+        let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
+        let req_header = build_dummy_ip(client_ip, dummy_ip, 43000, 3000);
+
+        // call client_handler and verify packet being sent out
+        lb.client_handler(&mut req_header.to_immutable(), tx.clone());
+        let fwd_pkt: MutableIpv4Packet = rx.recv().unwrap();
+        assert_eq!(fwd_pkt.get_destination(), dummy_ip);
+        assert_eq!(fwd_pkt.get_source(), dummy_ip);
+
+        let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
+        assert_eq!(tcp_resp.get_destination(), 3080);
+        assert_eq!(tcp_resp.get_source(), EPHEMERAL_PORT_LOWER + 1);
+
+        {
+            // check connection is being tracked
+            let port_mp = lb.port_mapper.lock().unwrap();
+            let cli = port_mp.get(&(EPHEMERAL_PORT_LOWER + 1)).unwrap();
+
+            let mut test_lb = lb.conn_tracker.lock().unwrap();
+            let conn = test_lb.get(&cli).unwrap();
+            assert_eq!(conn.ephem_port, EPHEMERAL_PORT_LOWER + 1);
+            assert_eq!(conn.client, SocketAddr::new(IpAddr::V4(client_ip), 43000));
+        }
+
+        {
+            assert_eq!(lb.conn_tracker.lock().unwrap().len(), 1);
+        }
+
+        {
+            // check same client again to verify connection tracker is used
+            lb.client_handler(&mut req_header.to_immutable(), tx.clone());
+            // next port should not have incremented
+            assert_eq!(*lb.next_port.lock().unwrap(), EPHEMERAL_PORT_LOWER + 1);
+
+            let fwd_pkt: MutableIpv4Packet = rx.recv().unwrap();
+            assert_eq!(fwd_pkt.get_destination(), dummy_ip);
+            assert_eq!(fwd_pkt.get_source(), dummy_ip);
+
+            let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
+            assert_eq!(tcp_resp.get_destination(), 3080);
+            assert_eq!(tcp_resp.get_source(), EPHEMERAL_PORT_LOWER + 1);
+            assert_eq!(lb.conn_tracker.lock().unwrap().len(), 1);
+        }
+
+        {
+            // set backend server to unhealthy
+            let mut srvs_map = lb.backend.servers_map.write().unwrap();
+            let mut srvs_ring = lb.backend.ring.lock().unwrap();
+            let health = srvs_map.get_mut(&SocketAddr::new(IpAddr::V4(dummy_ip), 3080)).unwrap();
+            *health = false;
+            srvs_ring.remove_node(&Node{host: IpAddr::V4(dummy_ip), port: 3080})
+        }
+
+        // check same client again to verify connection is failed
+        lb.client_handler(&mut req_header.to_immutable(), tx.clone());
+        // since there are not healthy backend servers there should be no connections added to map
+        assert_eq!(lb.conn_tracker.lock().unwrap().len(), 0);
     }
 }
