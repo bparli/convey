@@ -341,8 +341,8 @@ impl LB {
             debug!("Found existing connection {:?}", conn);
             match conn.backend_srv.host {
                 IpAddr::V4(node_ipv4) => {
-                    let fwd_ipv4 = node_ipv4.clone();
                     if self.backend.get_server_health(conn.backend_srv.clone()) {
+                        let fwd_ipv4 = node_ipv4.clone();
                         tcp_header.set_destination(conn.backend_srv.port);
 
                         // leave original tcp source if dsr
@@ -425,7 +425,6 @@ impl LB {
                     {
                         self.conn_tracker.lock().unwrap().insert(cli, conn);
                     }
-                    println!("conn tracker size {}", self.conn_tracker.lock().unwrap().len());
                     return Some(mssg)
                 }
                 _ => { return None }
@@ -688,10 +687,12 @@ mod tests {
     use std::{time};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use self::passthrough::utils::{build_dummy_eth, build_dummy_ip};
-    use self::passthrough::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, Node};
+    use self::passthrough::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, Node, process_packets};
     use pnet::packet::tcp::{TcpPacket};
     use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
+    use pnet::packet::ethernet::EthernetPacket;
     use pnet::packet::Packet;
+    use crossbeam_channel::unbounded;
 
     fn update_config(filename: &str, word_from: String, word_to: String) {
         let mut src = File::open(&filename).unwrap();
@@ -709,22 +710,31 @@ mod tests {
 
     #[test]
     fn test_new_passthrough() {
-        thread::spawn( move ||{
-            let addr = format!("{}{}", "127.0.0.1", ":3080").parse().unwrap();
-            let server = Server::bind(&addr)
-            .serve(|| {
-                service_fn_ok(move |_: Request<Body>| {
-                    Response::new(Body::from("Success DummyA Server"))
-                })
-            })
-            .map_err(|e| eprintln!("server error: {}", e));
-            rt::run(server);
-        });
+        // thread::spawn( move ||{
+        //     let addr = format!("{}{}", "127.0.0.1", ":3080").parse().unwrap();
+        //     let server = Server::bind(&addr)
+        //     .serve(|| {
+        //         service_fn_ok(move |_: Request<Body>| {
+        //             Response::new(Body::from("Success DummyA Server"))
+        //         })
+        //     })
+        //     .map_err(|e| eprintln!("server error: {}", e));
+        //     rt::run(server);
+        // });
 
         let conf = Config::new("testdata/passthrough_test.toml").unwrap();
         let srv = passthrough::Server::new(conf.clone(), false);
-
         let mut lb = srv.lbs[0].clone();
+
+        {
+            // set a backend server to healthy
+            let mut srvs_map = lb.backend.servers_map.write().unwrap();
+            let mut srvs_ring = lb.backend.ring.lock().unwrap();
+            let health = srvs_map.get_mut(&SocketAddr::new(IpAddr::V4("127.0.0.1".parse().unwrap()), 3080)).unwrap();
+            *health = true;
+            srvs_ring.add_node(&Node{host: IpAddr::V4("127.0.0.1".parse().unwrap()), port: 3080})
+        }
+
         assert_eq!(lb.dsr, false);
         assert_eq!(lb.conn_tracker.lock().unwrap().len(), 0);
         assert_eq!(*lb.backend.servers_map.read().unwrap().get(&SocketAddr::new(IpAddr::V4("127.0.0.1".parse().unwrap()), 3080)).unwrap(), true);
@@ -794,52 +804,52 @@ mod tests {
         let mut lb = srv.lbs[0].clone();
 
         let (tx, rx) = channel();
-        let dummy_ip = "127.0.0.1".parse().unwrap();
+        let lb_ip = "127.0.0.1".parse().unwrap();
         let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
+        let backend_srv_ip: Ipv4Addr = "8.8.8.8".parse().unwrap();
 
-        let resp_header = build_dummy_ip(dummy_ip, dummy_ip, 80, 35000);
-        lb.server_response_handler(&mut resp_header.to_immutable(), &SocketAddr::new(IpAddr::V4("9.9.9.9".parse().unwrap()), 35000), tx);
+        // simulate response from server at port 80 to local (ephemeral) port 35000
+        let resp_header = build_dummy_ip(backend_srv_ip, lb_ip, 80, 35000);
+        // server should respond to client ip at client's port
+        lb.server_response_handler(&mut resp_header.to_immutable(), &SocketAddr::new(IpAddr::V4(client_ip), 55000), tx);
         let srv_resp: MutableIpv4Packet = rx.recv().unwrap();
         assert_eq!(srv_resp.get_destination(), client_ip);
-        assert_eq!(srv_resp.get_source(), dummy_ip);
+        assert_eq!(srv_resp.get_source(), lb_ip);
 
         let tcp_resp = TcpPacket::new(srv_resp.payload()).unwrap();
-        assert_eq!(tcp_resp.get_destination(), 35000);
+        assert_eq!(tcp_resp.get_destination(), 55000);
         assert_eq!(tcp_resp.get_source(), 3000);
-
     }
 
     #[test]
     fn test_passthrough_client() {
-        // start a backend server
-        thread::spawn( move ||{
-            let addr = format!("{}{}", "127.0.0.1", ":3080").parse().unwrap();
-            let server = Server::bind(&addr)
-            .serve(|| {
-                service_fn_ok(move |_: Request<Body>| {
-                    Response::new(Body::from("Success DummyA Server"))
-                })
-            })
-            .map_err(|e| eprintln!("server error: {}", e));
-            rt::run(server);
-        });
-
-        // load and run the loadbalancer
+        // load the loadbalancer
         let conf = Config::new("testdata/passthrough_test.toml").unwrap();
         let srv = passthrough::Server::new(conf, false);
         let mut lb = srv.lbs[0].clone();
 
-        // gen test ip/tcp packet with simulated client
         let (tx, rx) = channel();
-        let dummy_ip = "127.0.0.1".parse().unwrap();
+        let lb_ip = "127.0.0.1".parse().unwrap();
         let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
-        let req_header = build_dummy_ip(client_ip, dummy_ip, 43000, 3000);
+        let backend_srv_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
 
-        // call client_handler and verify packet being sent out
+        {
+            // set a backend server to healthy
+            let mut srvs_map = lb.backend.servers_map.write().unwrap();
+            let mut srvs_ring = lb.backend.ring.lock().unwrap();
+            let health = srvs_map.get_mut(&SocketAddr::new(IpAddr::V4(backend_srv_ip), 3080)).unwrap();
+            *health = true;
+            srvs_ring.add_node(&Node{host: IpAddr::V4(backend_srv_ip), port: 3080})
+        }
+
+        // gen test ip/tcp packet with simulated client
+        let req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
+
+        // call client_handler and verify packet being sent out to healthy backend server
         lb.client_handler(&mut req_header.to_immutable(), tx.clone());
         let fwd_pkt: MutableIpv4Packet = rx.recv().unwrap();
-        assert_eq!(fwd_pkt.get_destination(), dummy_ip);
-        assert_eq!(fwd_pkt.get_source(), dummy_ip);
+        assert_eq!(fwd_pkt.get_destination(), backend_srv_ip);
+        assert_eq!(fwd_pkt.get_source(), lb_ip);
 
         let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
         assert_eq!(tcp_resp.get_destination(), 3080);
@@ -867,8 +877,8 @@ mod tests {
             assert_eq!(*lb.next_port.lock().unwrap(), EPHEMERAL_PORT_LOWER + 1);
 
             let fwd_pkt: MutableIpv4Packet = rx.recv().unwrap();
-            assert_eq!(fwd_pkt.get_destination(), dummy_ip);
-            assert_eq!(fwd_pkt.get_source(), dummy_ip);
+            assert_eq!(fwd_pkt.get_destination(), backend_srv_ip);
+            assert_eq!(fwd_pkt.get_source(), lb_ip);
 
             let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
             assert_eq!(tcp_resp.get_destination(), 3080);
@@ -880,14 +890,115 @@ mod tests {
             // set backend server to unhealthy
             let mut srvs_map = lb.backend.servers_map.write().unwrap();
             let mut srvs_ring = lb.backend.ring.lock().unwrap();
-            let health = srvs_map.get_mut(&SocketAddr::new(IpAddr::V4(dummy_ip), 3080)).unwrap();
+            let health = srvs_map.get_mut(&SocketAddr::new(IpAddr::V4(backend_srv_ip), 3080)).unwrap();
             *health = false;
-            srvs_ring.remove_node(&Node{host: IpAddr::V4(dummy_ip), port: 3080})
+            srvs_ring.remove_node(&Node{host: IpAddr::V4(backend_srv_ip), port: 3080})
         }
 
         // check same client again to verify connection is failed
         lb.client_handler(&mut req_header.to_immutable(), tx.clone());
         // since there are not healthy backend servers there should be no connections added to map
         assert_eq!(lb.conn_tracker.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_passthrough_process_packets() {
+        // load the loadbalancer
+        let conf = Config::new("testdata/passthrough_test.toml").unwrap();
+        let srv = passthrough::Server::new(conf, false);
+        let lb = srv.lbs[0].clone();
+
+        let (incoming_tx, incoming_rx) = unbounded();
+        let (outgoing_tx, outgoing_rx) = channel();
+        let (stats_tx, _) = channel();
+        let mut thread_lb = lb.clone();
+        thread::spawn(move || {
+            process_packets(&mut thread_lb, incoming_rx, outgoing_tx, stats_tx);
+        });
+
+        let lb_ip = "127.0.0.1".parse().unwrap();
+        let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
+        let backend_srv_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
+
+        {
+            // set a backend server to healthy
+            let mut srvs_map = lb.backend.servers_map.write().unwrap();
+            let mut srvs_ring = lb.backend.ring.lock().unwrap();
+            let health = srvs_map.get_mut(&SocketAddr::new(IpAddr::V4(backend_srv_ip), 3080)).unwrap();
+            *health = true;
+            srvs_ring.add_node(&Node{host: IpAddr::V4(backend_srv_ip), port: 3080})
+        }
+
+        // simulated client packet
+        let test_eth = build_dummy_eth(client_ip, lb_ip, 35000, 3000);
+        // send to process packet thread
+        incoming_tx.send(EthernetPacket::owned(test_eth.packet().to_owned()).unwrap()).unwrap();
+
+        // read and verify the outgoing processed packet
+        let fwd_pkt: MutableIpv4Packet = outgoing_rx.recv().unwrap();
+        assert_eq!(fwd_pkt.get_destination(), backend_srv_ip);
+        assert_eq!(fwd_pkt.get_source(), lb_ip);
+
+        let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
+        assert_eq!(tcp_resp.get_destination(), 3080);
+        assert_eq!(tcp_resp.get_source(), EPHEMERAL_PORT_LOWER + 1);
+
+        // simulated server response packet from port 3080 to "ephemeral" port mapped to client
+        let test_eth = build_dummy_eth(backend_srv_ip, lb_ip, 3080, EPHEMERAL_PORT_LOWER + 1);
+        // send to process packet thread
+        incoming_tx.send(EthernetPacket::owned(test_eth.packet().to_owned()).unwrap()).unwrap();
+        // read and verify the outgoing processed packet
+        let fwd_pkt: MutableIpv4Packet = outgoing_rx.recv().unwrap();
+        assert_eq!(fwd_pkt.get_destination(), client_ip);
+        assert_eq!(fwd_pkt.get_source(), lb_ip);
+
+        let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
+        // packet should go back to client's actual ephemeral port
+        assert_eq!(tcp_resp.get_destination(), 35000);
+        assert_eq!(tcp_resp.get_source(), 3000);
+    }
+
+    #[test]
+    fn test_dsr_process_packets() {
+        // load the loadbalancer
+        let conf = Config::new("testdata/passthrough_test.toml").unwrap();
+        // set dsr flag to true this time
+        let srv = passthrough::Server::new(conf, true);
+        let lb = srv.lbs[0].clone();
+
+        let (incoming_tx, incoming_rx) = unbounded();
+        let (outgoing_tx, outgoing_rx) = channel();
+        let (stats_tx, _) = channel();
+        let mut thread_lb = lb.clone();
+        thread::spawn(move || {
+            process_packets(&mut thread_lb, incoming_rx, outgoing_tx, stats_tx);
+        });
+
+        let lb_ip = "127.0.0.1".parse().unwrap();
+        let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
+        let backend_srv_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
+
+        {
+            // set a backend server to healthy
+            let mut srvs_map = lb.backend.servers_map.write().unwrap();
+            let mut srvs_ring = lb.backend.ring.lock().unwrap();
+            let health = srvs_map.get_mut(&SocketAddr::new(IpAddr::V4(backend_srv_ip), 3080)).unwrap();
+            *health = true;
+            srvs_ring.add_node(&Node{host: IpAddr::V4(backend_srv_ip), port: 3080})
+        }
+
+        // simulated client packet
+        let test_eth = build_dummy_eth(client_ip, lb_ip, 35000, 3000);
+        // send to process packet thread
+        incoming_tx.send(EthernetPacket::owned(test_eth.packet().to_owned()).unwrap()).unwrap();
+
+        // read and verify the outgoing processed packet
+        let fwd_pkt: MutableIpv4Packet = outgoing_rx.recv().unwrap();
+        assert_eq!(fwd_pkt.get_destination(), backend_srv_ip);
+        assert_eq!(fwd_pkt.get_source(), client_ip);
+
+        let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
+        assert_eq!(tcp_resp.get_destination(), 3080);
+        assert_eq!(tcp_resp.get_source(), 35000);
     }
 }

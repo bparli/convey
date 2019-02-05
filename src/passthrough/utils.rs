@@ -5,8 +5,7 @@ use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{tcp, Packet};
 use pnet::packet::ipv4::{MutableIpv4Packet};
 use std::net::{IpAddr, Ipv4Addr};
-use pnet::datalink::{NetworkInterface};
-use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket, EthernetPacket};
+use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
 use pnet::datalink::MacAddr;
 
 const ETHERNET_HEADER_LEN: usize = 14;
