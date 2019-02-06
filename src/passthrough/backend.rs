@@ -51,8 +51,8 @@ impl Backend {
     }
 
     pub fn get_server(&self, ip_dst: IpAddr, port_dst: u16, ip_src: IpAddr, port_src: u16) -> Option<Node> {
-        // Build "4-tuple of destination ip, destination port, source ip, source port
-        // in form of str to feed to hashring"
+        // Build "4-tuple" of destination ip, destination port, source ip, source port
+        // in form of str to feed to hashring
         let mut tuple: String = ip_dst.to_string();
         tuple.push_str(&port_dst.to_string());
         tuple.push_str(&ip_src.to_string());

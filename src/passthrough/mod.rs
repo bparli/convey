@@ -316,9 +316,6 @@ impl LB {
             port: client_port,
         };
 
-        // flag for removing client connection from connection tracker
-        let mut cli_unhealthy = false;
-
         if let Some(conn) = self.cli_connection(&cli) {
             debug!("Found existing connection {:?}", conn);
             match conn.backend_srv.host {
@@ -351,16 +348,11 @@ impl LB {
                         debug!("Backend sever {:?} is no longer healthy.  Rescheduling", conn.backend_srv);
                         // backend server is unhealthy, remove connection from map
                         // leave in port_mapper in case there are still packets from server in flight
-                        cli_unhealthy = true;
+                        self.conn_tracker.lock().unwrap().remove(&cli);
                     }
                 }
                 _ => { return None }
             }
-        }
-
-        // Backend server was flagged as unhealthy.  remove from connection tracker
-        if cli_unhealthy {
-            self.conn_tracker.lock().unwrap().remove(&cli);
         }
 
         // Either not tracking connection yet or backend server not healthy
