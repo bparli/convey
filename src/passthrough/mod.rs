@@ -16,7 +16,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use pnet::datalink::{self, NetworkInterface};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::datalink::Channel::Ethernet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::str::FromStr;
 use std::sync::mpsc::{Sender, Receiver};
 use std::collections::HashMap;
@@ -85,7 +85,7 @@ pub struct LB {
     // Only used in Passthrough mode without DSR (so bidirectional)
     // Since DSR bypasses coming back through the loadbalancer this data structure
     // isn't needed in Passthrough DSR mode
-    port_mapper: Arc<Mutex<HashMap<u16, Client>>>,
+    port_mapper: Arc<RwLock<HashMap<u16, Client>>>,
 
     // Keeping track of the next port to assign for client -> backend server mappings
     next_port: Arc<Mutex<u16>>,
@@ -161,7 +161,7 @@ impl Server {
                             listen_port: listen_addr.port(),
                             backend: backend.clone(),
                             conn_tracker: Arc::new(Mutex::new(LruCache::<Client, Connection>::with_capacity(connection_tracker_capacity))),
-                            port_mapper: Arc::new(Mutex::new(HashMap::new())),
+                            port_mapper: Arc::new(RwLock::new(HashMap::new())),
                             next_port: Arc::new(Mutex::new(EPHEMERAL_PORT_LOWER)),
                             workers: workers,
                             dsr: dsr,
@@ -370,7 +370,7 @@ impl LB {
                         ephem_port = self.clone().next_avail_port();
                         debug!("Using Ephemeral port {} for client connection {:?}", ephem_port, SocketAddr::new(IpAddr::V4(ip_header.get_source()), client_port));
                         {
-                            self.port_mapper.lock().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: client_port});
+                            self.port_mapper.write().unwrap().insert(ephem_port, Client{ip: IpAddr::V4(ip_header.get_source()), port: client_port});
                         }
                         tcp_header.set_source(ephem_port);
                         tcp_header.set_checksum(tcp::ipv4_checksum(&tcp_header.to_immutable(), &self.listen_ip, &fwd_ipv4));
@@ -494,7 +494,7 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
                                         };
                                     } else if !lb.dsr {
                                         // only handling server repsonses if not using dsr
-                                        let guard =  lb.port_mapper.lock().unwrap();
+                                        let guard =  lb.port_mapper.read().unwrap();
                                         let client_addr = guard.get(&tcp_header.get_destination());
                                         match client_addr {
                                             Some(client_addr) => {
@@ -827,7 +827,7 @@ mod tests {
 
         {
             // check connection is being tracked
-            let port_mp = lb.port_mapper.lock().unwrap();
+            let port_mp = lb.port_mapper.read().unwrap();
             let cli = port_mp.get(&(EPHEMERAL_PORT_LOWER + 1)).unwrap();
 
             let mut test_lb = lb.conn_tracker.lock().unwrap();
