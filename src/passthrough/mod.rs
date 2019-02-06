@@ -240,7 +240,7 @@ impl LB {
     }
 
     // handle repsonse packets from a backend server passing back through the loadbalancer
-    fn server_response_handler(&mut self, tcp_header: &mut MutableTcpPacket, client_addr: &SocketAddr, tx: Sender<MutableIpv4Packet>) -> Option<StatsMssg> {
+    fn server_response_handler(&mut self, ip_header: &Ipv4Packet, tcp_header: &mut MutableTcpPacket, client_addr: &SocketAddr, tx: Sender<MutableIpv4Packet>) -> Option<StatsMssg> {
         match client_addr.ip() {
             IpAddr::V4(client_ipv4) => {
                 let mut mssg = StatsMssg{frontend: None,
@@ -250,8 +250,10 @@ impl LB {
                                     bytes_rx: 0,
                                     servers: None};
 
-                let ipbuf: Vec<u8> = vec!(0; tcp_header.packet().len() + IPV4_HEADER_LEN);
-                let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
+                // let ipbuf: Vec<u8> = vec!(0; tcp_header.packet().len() + IPV4_HEADER_LEN);
+                // let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
+
+                let mut new_ipv4 = MutableIpv4Packet::owned(ip_header.packet().to_vec()).unwrap();
                 tcp_header.set_destination(client_addr.port());
                 tcp_header.set_source(self.listen_port);
                 tcp_header.set_checksum(tcp::ipv4_checksum(&tcp_header.to_immutable(), &self.listen_ip, &client_ipv4));
@@ -297,8 +299,9 @@ impl LB {
                             bytes_rx: 0,
                             servers: None};
 
-        let ipbuf: Vec<u8> = vec!(0; tcp_header.packet().len() + IPV4_HEADER_LEN);
-        let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
+        // let ipbuf: Vec<u8> = vec!(0; tcp_header.packet().len() + IPV4_HEADER_LEN);
+        // let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
+        let mut new_ipv4 = MutableIpv4Packet::owned(ip_header.packet().to_vec()).unwrap();
 
         new_ipv4.set_total_length(tcp_header.packet().len() as u16 + IPV4_HEADER_LEN as u16);
         new_ipv4.set_version(4);
@@ -495,7 +498,7 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
                     Some(mut ip_header) => {
                         let ip_addr = ip_header.get_destination();
                         if ip_addr == lb.listen_ip {
-                            match MutableTcpPacket::new(&mut ip_header.payload().to_owned()) {
+                            match MutableTcpPacket::new(&mut ip_header.payload().to_vec()) {
                                 Some(mut tcp_header) => {
                                     if tcp_header.get_destination() == lb.listen_port {
                                         if let Some(stats_update) = lb.client_handler(&mut ip_header, &mut tcp_header, loop_tx.clone()) {
@@ -507,7 +510,7 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
                                         // only handling server repsonses if not using dsr
                                         if let Some(client_addr) = lb.port_mapper.lock().unwrap().get_mut(&tcp_header.get_destination()) {
                                             // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
-                                            if let Some(stats_update) = lb.clone().server_response_handler(&mut tcp_header, &SocketAddr::new( client_addr.ip, client_addr.port), loop_tx.clone()) {
+                                            if let Some(stats_update) = lb.clone().server_response_handler(&mut ip_header, &mut tcp_header, &SocketAddr::new( client_addr.ip, client_addr.port), loop_tx.clone()) {
                                                 stats.connections += &stats_update.connections;
                                                 stats.bytes_rx += &stats_update.bytes_rx;
                                                 stats.bytes_tx += &stats_update.bytes_tx;
@@ -621,7 +624,7 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
     loop {
         match iface_rx.next() {
             Ok(packet) => {
-                let ethernet = EthernetPacket::owned(packet.to_owned()).unwrap();
+                let ethernet = EthernetPacket::owned(packet.to_vec()).unwrap();
                 match ethernet.get_ethertype() {
                     EtherTypes::Ipv4 => {
                         match incoming_tx.send(ethernet) {
@@ -783,7 +786,7 @@ mod tests {
         let resp_header = build_dummy_ip(backend_srv_ip, lb_ip, 80, 35000);
         let mut tcp_header = MutableTcpPacket::owned(resp_header.payload().to_owned()).unwrap();
         // server should respond to client ip at client's port
-        lb.server_response_handler(&mut tcp_header, &SocketAddr::new(IpAddr::V4(client_ip), 55000), tx);
+        lb.server_response_handler(&resp_header.to_immutable(), &mut tcp_header, &SocketAddr::new(IpAddr::V4(client_ip), 55000), tx);
         let srv_resp: MutableIpv4Packet = rx.recv().unwrap();
         assert_eq!(srv_resp.get_destination(), client_ip);
         assert_eq!(srv_resp.get_source(), lb_ip);
