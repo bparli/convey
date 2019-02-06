@@ -250,9 +250,6 @@ impl LB {
                                     bytes_rx: 0,
                                     servers: None};
 
-                // let ipbuf: Vec<u8> = vec!(0; tcp_header.packet().len() + IPV4_HEADER_LEN);
-                // let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
-
                 let mut new_ipv4 = MutableIpv4Packet::owned(ip_header.packet().to_vec()).unwrap();
                 tcp_header.set_destination(client_addr.port());
                 tcp_header.set_source(self.listen_port);
@@ -299,10 +296,7 @@ impl LB {
                             bytes_rx: 0,
                             servers: None};
 
-        // let ipbuf: Vec<u8> = vec!(0; tcp_header.packet().len() + IPV4_HEADER_LEN);
-        // let mut new_ipv4 = MutableIpv4Packet::owned(ipbuf).unwrap();
         let mut new_ipv4 = MutableIpv4Packet::owned(ip_header.packet().to_vec()).unwrap();
-
         new_ipv4.set_total_length(tcp_header.packet().len() as u16 + IPV4_HEADER_LEN as u16);
         new_ipv4.set_version(4);
         new_ipv4.set_ttl(225);
