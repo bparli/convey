@@ -502,13 +502,21 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
                                         };
                                     } else if !lb.dsr {
                                         // only handling server repsonses if not using dsr
-                                        if let Some(client_addr) = lb.port_mapper.lock().unwrap().get_mut(&tcp_header.get_destination()) {
-                                            // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
-                                            if let Some(stats_update) = lb.clone().server_response_handler(&mut ip_header, &mut tcp_header, &SocketAddr::new( client_addr.ip, client_addr.port), loop_tx.clone()) {
-                                                stats.connections += &stats_update.connections;
-                                                stats.bytes_rx += &stats_update.bytes_rx;
-                                                stats.bytes_tx += &stats_update.bytes_tx;
-                                            };
+                                        let guard =  lb.port_mapper.lock().unwrap();
+                                        let client_addr = guard.get(&tcp_header.get_destination());
+                                        match client_addr {
+                                            Some(client_addr) => {
+                                                // drop the lock!
+                                                let cli_socket = &SocketAddr::new( client_addr.ip, client_addr.port);
+                                                std::mem::drop(guard);
+                                                // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
+                                                if let Some(stats_update) = lb.clone().server_response_handler(&mut ip_header, &mut tcp_header, cli_socket, loop_tx.clone()) {
+                                                    stats.connections += &stats_update.connections;
+                                                    stats.bytes_rx += &stats_update.bytes_rx;
+                                                    stats.bytes_tx += &stats_update.bytes_tx;
+                                                };
+                                            }
+                                            None => {},
                                         }
                                     }
                                     match stats_rx.try_recv() {
