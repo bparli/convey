@@ -4,13 +4,20 @@ use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{tcp, Packet};
 use pnet::packet::ipv4::{MutableIpv4Packet};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
 use pnet::datalink::MacAddr;
+use socket2::{Socket, Domain, Type, SockAddr};
 
-const ETHERNET_HEADER_LEN: usize = 14;
-const IPV4_HEADER_LEN: usize = 20;
-const TCP_HEADER_LEN: usize = 32;
+// health ports are reserved for health checks
+pub const HEALTH_PORT_LOWER: u16 = 32768;
+pub const HEALTH_PORT_UPPER: u16 = 33767;
+pub const EPHEMERAL_PORT_LOWER: u16 = 33768;
+pub const EPHEMERAL_PORT_UPPER: u16 = 61000;
+
+pub const ETHERNET_HEADER_LEN: usize = 14;
+pub const IPV4_HEADER_LEN: usize = 20;
+pub const TCP_HEADER_LEN: usize = 32;
 
 fn find_local_addr() -> Option<IpAddr> {
     for iface in pnet::datalink::interfaces() {
@@ -77,4 +84,18 @@ pub fn build_dummy_eth(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_po
     eth_header.set_payload(&ip_header.packet());
 
     return eth_header;
+}
+
+// only use for health checks
+pub fn allocate_socket(listen_ip: Ipv4Addr) -> Option<Socket> {
+    // bind to a pre-determined local port and use a connection timeout
+    let socket = Socket::new(Domain::ipv4(), Type::stream(), None).unwrap();
+    for i in HEALTH_PORT_LOWER..HEALTH_PORT_UPPER {
+        match socket.bind(&SockAddr::from(SocketAddr::new(IpAddr::V4(listen_ip), i))) {
+            Ok(_) => return Some(socket),
+            Err(_) => {},
+        }
+    }
+    error!("Unable to allocate local port from range {} - {}", HEALTH_PORT_LOWER, HEALTH_PORT_UPPER);
+    None
 }

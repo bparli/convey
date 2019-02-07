@@ -22,16 +22,10 @@ use std::sync::mpsc::{Sender, Receiver};
 use std::collections::HashMap;
 use std::{thread};
 use lru_time_cache::LruCache;
-use tokio::prelude::*;
-use tokio::timer::Interval;
-use std::time::{Duration, Instant};
-use futures::future::lazy;
+use std::time::Duration;
 use crossbeam_channel::unbounded;
 use std::sync::mpsc::channel;
-
-const IPV4_HEADER_LEN: usize = 20;
-const EPHEMERAL_PORT_LOWER: u16 = 32768;
-const EPHEMERAL_PORT_UPPER: u16 = 61000;
+use self::utils::{IPV4_HEADER_LEN, EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER};
 
 mod backend;
 mod utils;
@@ -215,10 +209,10 @@ impl Server {
     pub fn run(self, sender: Sender<StatsMssg>) {
         let mut threads = Vec::new();
         for lb in self.lbs.iter() {
-            let srv_thread = lb.clone();
+            let mut srv_thread = lb.clone();
             let thread_sender = sender.clone();
             let t = thread::spawn(move ||{
-                run_server(srv_thread, thread_sender);
+                run_server(&mut srv_thread, thread_sender);
             });
             threads.push(t);
         }
@@ -539,15 +533,23 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
     }
 }
 
-pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
+pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
     debug!("Listening for: {:?}, {:?}", lb.listen_ip, lb.listen_port);
     debug!("Load Balancing to: {:?}", lb.backend.name);
 
+    // spawn background health check thread
     let backend = lb.backend.clone();
     let health_sender = sender.clone();
+    let ip = lb.listen_ip;
     thread::spawn( move || {
-        sched_health_checks(backend, health_sender);
+        loop {
+            health_checker(backend.clone(), &health_sender, ip);
+            let interval = Duration::from_secs(backend.health_check_interval);
+            thread::sleep(interval);
+        }
     });
+
+    // find local interface we should be listening on
     let interface = match find_interface(lb.listen_ip) {
         Some(interface) => {
             if interface.is_loopback() {
@@ -574,9 +576,9 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
     // incoming ethernet packets to multiple workers
     let (incoming_tx, incoming_rx) = unbounded();
 
-    let (outgoing_tx, outgoing_rx) = channel();
     // multi producer / single receiver channel for worker threads to
     // send outgoing ethernet packets
+    let (outgoing_tx, outgoing_rx) = channel();
 
     // spawn the packet processing workers
     for _ in 0..lb.workers {
@@ -636,23 +638,6 @@ pub fn run_server(lb: LB, sender: Sender<StatsMssg>) {
     }
 }
 
-fn sched_health_checks(backend: Arc<Backend>, sender: Sender<StatsMssg>) {
-    tokio::run(lazy( move || {
-        // schedule health checker
-        let time = backend.health_check_interval;
-        let timer_sender = sender.clone();
-        let task = Interval::new(Instant::now(), Duration::from_secs(time))
-            .for_each(move |instant| {
-                health_checker(backend.clone(), &timer_sender);
-                debug!("Running backend health checker{:?}", instant);
-                Ok(())
-            })
-            .map_err(|e| panic!("interval errored; err={:?}", e));
-        tokio::spawn(task);
-        Ok(())
-    }));
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -665,8 +650,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::{time};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use self::passthrough::utils::{build_dummy_eth, build_dummy_ip};
-    use self::passthrough::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, Node, process_packets};
+    use self::passthrough::utils::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, build_dummy_eth, build_dummy_ip};
+    use self::passthrough::{Node, process_packets};
     use pnet::packet::tcp::{TcpPacket, MutableTcpPacket};
     use pnet::packet::ipv4::{MutableIpv4Packet};
     use pnet::packet::ethernet::EthernetPacket;

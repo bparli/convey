@@ -5,9 +5,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Mutex};
 use crate::stats::StatsMssg;
 use std::sync::mpsc::{Sender};
-use std::net::{TcpStream, IpAddr, SocketAddr};
+use std::net::{TcpStream, IpAddr, Ipv4Addr, SocketAddr};
 use hash_ring::HashRing;
 use std::time;
+use socket2::SockAddr;
+use crate::passthrough;
+use self::passthrough::utils::allocate_socket;
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -104,7 +107,7 @@ impl ServerPool {
         for (server, _) in &servers {
             // only support ipv4 for now
             if server.is_ipv4() {
-                if tcp_health_check(*server) {
+                if simple_tcp_health_check(*server) {
                     backend_servers.insert(*server, true);
                     nodes.push(Node{host: server.ip(), port: server.port()})
                 } else {
@@ -123,7 +126,7 @@ impl ServerPool {
     }
 }
 
-fn tcp_health_check(server: SocketAddr) -> bool {
+fn simple_tcp_health_check(server: SocketAddr) -> bool {
     if let Ok(_) = TcpStream::connect_timeout(&server, time::Duration::from_secs(3)) {
         true
     } else {
@@ -131,14 +134,27 @@ fn tcp_health_check(server: SocketAddr) -> bool {
     }
 }
 
-pub fn health_checker(backend: Arc<Backend>, sender: &Sender<StatsMssg>) {
+// tcp_health_check is a more complex tcpstream with connection timeout and binding to a
+// local port so as not to collide with load balanced packets
+fn tcp_health_check(server: SocketAddr, ip: Ipv4Addr) -> bool {
+    if let Some(sock) = allocate_socket(ip) {
+        if let Ok(_) = sock.connect_timeout(&SockAddr::from(server), time::Duration::from_secs(3)) {
+            return true
+        } else {
+            return false
+        }
+    }
+    error!("Unable to allocate port for health checking");
+    true
+}
+
+pub fn health_checker(backend: Arc<Backend>, sender: &Sender<StatsMssg>, local_ip: Ipv4Addr) {
     let mut backend_status = HashMap::new();
     let mut backend_updates = HashMap::new();
     // limit scope of read lock
     {
-        //let srvs = backend.servers.read().unwrap();
         for (server, status) in backend.servers_map.read().unwrap().iter() {
-            let res = tcp_health_check(*server);
+            let res = tcp_health_check(*server, local_ip);
             if res != *status {
                 info!("Server {} status has changed from {} to {}.  Updating stats and backend", server, status, res);
                 backend_updates.insert(server.clone(), res);
@@ -180,6 +196,7 @@ mod tests {
     use std::str::FromStr;
     use std::net::TcpListener;
     use std::{thread, time};
+    use crate::passthrough;
 
     #[test]
     fn test_new_servers_pt() {
@@ -278,7 +295,7 @@ mod tests {
         let (tx, rx) = channel();
 
         // run health chcker
-        health_checker(test_bck.clone(), &tx);
+        health_checker(test_bck.clone(), &tx, "127.0.0.1".parse().unwrap());
 
         // verify repsonse message
         let resp = rx.recv().unwrap();
