@@ -54,11 +54,11 @@ fn main() {
             let stats_sender = stats::run(&config.base);
             if args.get_bool("--passthrough") {
                 debug!("Starting loadbalancer in passthrough mode");
-                let loadbalancer = passthrough::Server::new(config, false);
+                let mut loadbalancer = passthrough::Server::new(config, false);
                 loadbalancer.run(stats_sender);
             } else if args.get_bool("--dsr") {
                 debug!("Starting loadbalancer in direct server return mode");
-                let loadbalancer = passthrough::Server::new(config, true);
+                let mut loadbalancer = passthrough::Server::new(config, true);
                 loadbalancer.run(stats_sender);
             } else {
                 debug!("Starting loadbalancer in proxy mode");

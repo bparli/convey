@@ -143,9 +143,7 @@ pub fn run(lb_config: &BaseConfig) -> Sender<StatsMssg> {
                         }
                     }
                 },
-                Err(e) => {
-                    error!("An error occurred while reading: {}", e);
-                }
+                Err(e) => error!("An error occurred while reading: {}", e),
             }
         }
     });
