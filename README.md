@@ -49,6 +49,11 @@ sudo iptables -t raw -A PREROUTING -p tcp --dport <LOAD_BALANCER_PORT> -j DROP
 sudo iptables -t raw -A PREROUTING -p tcp --sport <BACKEND_SERVER_PORT> --dport 32768:61000 -j DROP
 ```
 
+To run
+```
+sudo ./target/release/convey --passthrough --config=sample-passthrough.toml
+```
+
 ### DSR Mode
 For dsr mode we need the same iptables rule for ingress packets.  Responses from the backend load balanced servers will be going directly to the clients.  The "listening" port on the convey load balancer must match the backend load balanced servers listening ports in this mode.
 
@@ -70,10 +75,20 @@ sudo tc filter add dev enp0s8 parent 10: protocol ip prio 1 u32 match ip src <LO
 sudo tc filter add dev enp0s8 parent 10: protocol ip prio 10 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff action nat egress 192.168.1.117 <LOAD_BALANCER_IP>
 ``` 
 
+To run
+```
+sudo ./target/release/convey --dsr --config=sample-passthrough.toml
+```
+
 ### Proxy 
 No special setup neccessary
 
 ![proxy](https://docs.google.com/drawings/d/e/2PACX-1vQC7fAvVEs0Xb0kcAFfCLIVukhkIrlu-DS_tbrtgpRonmsHO9STpnXvI7NogXiBVUON9gS-L4MLqYV2/pub?w=581&h=326)
+
+To run
+```
+sudo ./target/release/convey --config=sample-proxy.toml
+```
 
 ## Tests
 The easiest way to run tests is to run them as superuser.  This is because some of the tests spin up test servers as well as a convey load balancer instance.
