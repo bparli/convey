@@ -22,12 +22,14 @@ Usage:
   convey (-p | --passthrough) --config=<config_file>
   convey (-d | --dsr) --config=<config_file>
   convey (-p | --passthrough)
+  convey (-d | --dsr)
   convey (-h | --help)
   convey (-v | --version)
 
 Options:
-  -h, --help               Show this screen.
+  -h, --help               Show this screen.s
   -p, --passthrough        Run load balancer in passthrough mode (instead of default proxy mode)
+  -d, --dsr                Run load balancer in direct server mode (instead of default proxy mode)
   --config=<config_file>   Config file location [default config.toml].
   -v, --version            Show version.
 ";
