@@ -20,6 +20,7 @@ pub struct BaseConfig {
     pub frontends: HashMap<String, FrontendConfig>,
     pub backends: HashMap<String, BackendPool>,
     pub stats: Stats,
+    pub passthrough: Option<Passthrough>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -43,6 +44,13 @@ pub struct BackendPool {
 pub struct ServerConfig {
     pub addr:    String,
     pub weight: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone, Copy)]
+pub struct Passthrough {
+    pub connection_tracker_capacity: usize,
+    pub workers: Option<usize>,
+    pub stats_update_frequency: Option<u64>,
 }
 
 #[derive(Debug)]

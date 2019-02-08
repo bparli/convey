@@ -10,6 +10,7 @@ use crate::stats::StatsMssg;
 use std::sync::mpsc::{Sender};
 use rand::distributions::WeightedIndex;
 use rand::prelude::*;
+use std::time;
 
 #[derive(Debug, Clone)]
 struct Wrr {
@@ -130,7 +131,7 @@ pub fn get_next(backend: Arc<Backend>) -> NextBackend {
 }
 
 fn tcp_health_check(server: SocketAddr) -> bool {
-    if let Ok(_) = TcpStream::connect(server) {
+    if let Ok(_) = TcpStream::connect_timeout(&server, time::Duration::from_secs(3)) {
         true
     } else {
         false

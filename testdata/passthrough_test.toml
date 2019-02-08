@@ -1,16 +1,19 @@
 [frontends.tcp_3000]
-listen_addr = "0.0.0.0:3000"
+listen_addr = "127.0.0.1:3000"
 backend = "tcp3000_out"
 
 [backends.tcp3000_out]
-  health_check_interval = 3
+  health_check_interval = 300
   [backends.tcp3000_out.servers]
     [backends.tcp3000_out.servers.server1]
-    addr = "127.0.0.1:8080"
-    weight = 10000
+    addr = "127.0.0.1:3080"
     [backends.tcp3000_out.servers.server2]
-    addr = "127.0.0.1:8081"
-    weight = 1
+    addr = "127.0.0.1:3081"
 
 [stats]
 port = "7000"
+
+[passthrough]
+connection_tracker_capacity = 2
+workers = 1
+stats_update_frequency = 3

@@ -10,6 +10,7 @@ use crate::config::BaseConfig;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub struct StatsMssg {
     pub frontend: Option<String>,
     pub backend: String,
@@ -142,9 +143,7 @@ pub fn run(lb_config: &BaseConfig) -> Sender<StatsMssg> {
                         }
                     }
                 },
-                Err(e) => {
-                    error!("An error occurred while reading: {}", e);
-                }
+                Err(e) => error!("An error occurred while reading: {}", e),
             }
         }
     });

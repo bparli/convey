@@ -1,0 +1,23 @@
+[frontends.tcp_80]
+listen_addr = "192.168.1.198:80"
+backend = "tcp80_out"
+
+[backends.tcp80_out]
+  health_check_interval = 3
+  [backends.tcp3000_out.servers]
+    [backends.tcp3000_out.servers.server1]
+    addr = "192.168.1.170:80"
+    [backends.tcp3000_out.servers.server2]
+    addr = "192.168.1.115:80"
+    [backends.tcp3000_out.servers.server3]
+    addr = "172.18.65.186:80"
+    [backends.tcp3000_out.servers.server4]
+    addr = "172.18.68.49:80"
+
+[stats]
+port = "7000"
+
+[passthrough]
+connection_tracker_capacity = 20000
+workers = 4
+stats_update_frequency = 5
