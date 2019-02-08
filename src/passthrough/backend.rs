@@ -196,7 +196,6 @@ mod tests {
     use std::str::FromStr;
     use std::net::TcpListener;
     use std::{thread, time};
-    use crate::passthrough;
 
     #[test]
     fn test_new_servers_pt() {

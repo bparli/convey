@@ -36,7 +36,7 @@ pub struct Server {
     // and the "frontends" in the config
     pub lbs: Vec<LB>,
 
-    // the listening end of the configuration sync channel.  New configs trigger this thread to refresh the 
+    // the listening end of the configuration sync channel.  New configs trigger this thread to refresh the
     // running config.  Only dynamic backends are supported for now
     config_rx: Receiver<BaseConfig>,
 }
@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn test_new_passthrough() {
         let conf = Config::new("testdata/passthrough_test.toml").unwrap();
-        let srv = passthrough::Server::new(conf.clone(), false);
+        let mut srv = passthrough::Server::new(conf.clone(), false);
         let mut lb = srv.lbs[0].clone();
 
         {
@@ -692,7 +692,7 @@ mod tests {
 
         //TODO: verify messages sent over channel to stats endpoint from proxy
         let (stats_tx, _) = channel();
-        thread::spawn( ||{
+        thread::spawn(move ||{
             srv.run(stats_tx);
         });
 
@@ -712,10 +712,10 @@ mod tests {
     #[test]
     fn test_passthrough_config_sync() {
         let conf = Config::new("testdata/passthrough_test.toml").unwrap();
-        let srv = passthrough::Server::new(conf, false);
+        let mut srv = passthrough::Server::new(conf, false);
         let lb = srv.lbs[0].clone();
         let (tx, _) = channel();
-        thread::spawn( ||{
+        thread::spawn(move ||{
             srv.run(tx);
         });
 
