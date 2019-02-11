@@ -46,7 +46,7 @@ For passthrough mode we need a couple iptables rules on the convey load balancer
 For passthrough mode on the convey load balancer
 ``` 
 sudo iptables -t raw -A PREROUTING -p tcp --dport <LOAD_BALANCER_PORT> -j DROP
-sudo iptables -t raw -A PREROUTING -p tcp --sport <BACKEND_SERVER_PORT> --dport 32768:61000 -j DROP
+sudo iptables -t raw -A PREROUTING -p tcp --sport <BACKEND_SERVER_PORT> --dport 33768:61000 -j DROP
 ```
 
 To run
