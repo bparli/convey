@@ -119,6 +119,7 @@ dependencies = [
  "futures 0.1.25 (registry+https://github.com/rust-lang/crates.io-index)",
  "hash_ring 0.1.7 (git+https://github.com/bparli/rust-hash-ring?branch=derive-clone-hashring)",
  "hyper 0.12.19 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ipnetwork 0.12.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "iron 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "log 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "lru_time_cache 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",

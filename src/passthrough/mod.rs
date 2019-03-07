@@ -3,18 +3,18 @@ extern crate pnet_macros_support;
 extern crate lru_time_cache;
 
 use self::backend::{Backend, ServerPool, Node, health_checker};
+use self::arp::Arp;
 use crate::config::{Config, BaseConfig};
 use crate::stats::StatsMssg;
 use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::transport::{transport_channel};
-use pnet::transport::TransportChannelType::{Layer3};
 use pnet::packet::tcp::{MutableTcpPacket};
-use pnet::packet::{tcp};
+use pnet::packet::{tcp, Packet};
 use pnet::packet::ipv4::{checksum, Ipv4Packet, MutableIpv4Packet};
-use pnet::packet::{Packet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use pnet::datalink::{self, NetworkInterface};
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+use pnet::util::MacAddr;
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
+use pnet::packet::arp::{MutableArpPacket, ArpOperations, ArpHardwareTypes};
 use pnet::datalink::Channel::Ethernet;
 use std::sync::{Arc, Mutex, RwLock};
 use std::str::FromStr;
@@ -25,9 +25,10 @@ use lru_time_cache::LruCache;
 use std::time::Duration;
 use crossbeam_channel::unbounded;
 use std::sync::mpsc::channel;
-use self::utils::{IPV4_HEADER_LEN, EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER};
+use self::utils::{IPV4_HEADER_LEN, EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, ETHERNET_HEADER_LEN};
 
 mod backend;
+mod arp;
 mod utils;
 
 //#[derive(Clone)]
@@ -438,7 +439,7 @@ impl LB {
 }
 
 fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
-    let interfaces = datalink::interfaces();
+    let interfaces = datalink::linux::interfaces();
     for interface in interfaces {
         for ip in interface.clone().ips {
             if ip.ip() == addr {
@@ -450,7 +451,7 @@ fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
 }
 
 // worker thread
-fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>, tx: Sender<MutableIpv4Packet>, sender: Sender<StatsMssg>) {
+fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>, tx: Sender<MutableIpv4Packet>, sender: Sender<StatsMssg>, arp_cache: &mut Arp) {
     let mut stats = StatsMssg{frontend: Some(lb.name.clone()),
                         backend: lb.backend.name.clone(),
                         connections: 0,
@@ -472,58 +473,65 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
     loop {
         match rx.recv() {
             Ok(ethernet) => {
-                match Ipv4Packet::new(ethernet.payload()) {
-                    Some(ip_header) => {
-                        let ip_addr = ip_header.get_destination();
-                        if ip_addr == lb.listen_ip {
-                            match MutableTcpPacket::new(&mut ip_header.payload().to_vec()) {
-                                Some(mut tcp_header) => {
-                                    if tcp_header.get_destination() == lb.listen_port {
-                                        if let Some(stats_update) = lb.client_handler(&ip_header, &mut tcp_header, loop_tx.clone()) {
-                                            stats.connections += &stats_update.connections;
-                                            stats.bytes_rx += &stats_update.bytes_rx;
-                                            stats.bytes_tx += &stats_update.bytes_tx;
-                                        };
-                                    } else if !lb.dsr {
-                                        // only handling server repsonses if not using dsr
-                                        let guard =  lb.port_mapper.read().unwrap();
-                                        let client_addr = guard.get(&tcp_header.get_destination());
-                                        match client_addr {
-                                            Some(client_addr) => {
-                                                // drop the lock!
-                                                let cli_socket = &SocketAddr::new( client_addr.ip, client_addr.port);
-                                                std::mem::drop(guard);
-                                                // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
-                                                if let Some(stats_update) = lb.clone().server_response_handler(&ip_header, &mut tcp_header, cli_socket, loop_tx.clone()) {
+                match ethernet.get_ethertype() {
+                    EtherTypes::Arp => {
+                        arp_cache.handle_arp(&ethernet)
+                    }
+                    EtherTypes::Ipv4 => {
+                        match Ipv4Packet::new(ethernet.payload()) {
+                            Some(ip_header) => {
+                                if ip_header.get_destination() == lb.listen_ip {
+                                    match MutableTcpPacket::new(&mut ip_header.payload().to_vec()) {
+                                        Some(mut tcp_header) => {
+                                            if tcp_header.get_destination() == lb.listen_port {
+                                                if let Some(stats_update) = lb.client_handler(&ip_header, &mut tcp_header, loop_tx.clone()) {
                                                     stats.connections += &stats_update.connections;
                                                     stats.bytes_rx += &stats_update.bytes_rx;
                                                     stats.bytes_tx += &stats_update.bytes_tx;
                                                 };
+                                            } else if !lb.dsr {
+                                                // only handling server repsonses if not using dsr
+                                                let guard =  lb.port_mapper.read().unwrap();
+                                                let client_addr = guard.get(&tcp_header.get_destination());
+                                                match client_addr {
+                                                    Some(client_addr) => {
+                                                        // drop the lock!
+                                                        let cli_socket = &SocketAddr::new( client_addr.ip, client_addr.port);
+                                                        std::mem::drop(guard);
+                                                        // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
+                                                        if let Some(stats_update) = lb.clone().server_response_handler(&ip_header, &mut tcp_header, cli_socket, loop_tx.clone()) {
+                                                            stats.connections += &stats_update.connections;
+                                                            stats.bytes_rx += &stats_update.bytes_rx;
+                                                            stats.bytes_tx += &stats_update.bytes_tx;
+                                                        };
+                                                    }
+                                                    None => {},
+                                                }
                                             }
-                                            None => {},
-                                        }
-                                    }
-                                    match stats_rx.try_recv() {
-                                        Ok(_) => {
-                                            // send the counters we've gathered in this time period
-                                            debug!("Timer fired, sending stats counters");
-                                            match sender.send(stats.clone()) {
-                                                Ok(_) => {},
-                                                Err(e) => error!("Error sending stats message on channel: {}", e)
+                                            match stats_rx.try_recv() {
+                                                Ok(_) => {
+                                                    // send the counters we've gathered in this time period
+                                                    debug!("Timer fired, sending stats counters");
+                                                    match sender.send(stats.clone()) {
+                                                        Ok(_) => {},
+                                                        Err(e) => error!("Error sending stats message on channel: {}", e)
+                                                    }
+                                                    // zero out counters for next time period
+                                                    stats.connections = 0;
+                                                    stats.bytes_rx = 0;
+                                                    stats.bytes_tx = 0;
+                                                }
+                                                Err(_) => {},
                                             }
-                                            // zero out counters for next time period
-                                            stats.connections = 0;
-                                            stats.bytes_rx = 0;
-                                            stats.bytes_tx = 0;
-                                        }
-                                        Err(_) => {},
+                                        },
+                                        None => {},
                                     }
-                                },
-                                None => {},
-                            }
+                                }
+                            },
+                            None => {},
                         }
-                    },
-                    None => {},
+                    }
+                    _ => {}
                 }
             }
             Err(e) => error!("Error receiving packet on channel {}", e),
@@ -534,18 +542,6 @@ fn process_packets(lb: &mut LB, rx: crossbeam_channel::Receiver<EthernetPacket>,
 pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
     debug!("Listening for: {:?}, {:?}", lb.listen_ip, lb.listen_port);
     debug!("Load Balancing to: {:?}", lb.backend.name);
-
-    // spawn background health check thread
-    let backend = lb.backend.clone();
-    let health_sender = sender.clone();
-    let ip = lb.listen_ip;
-    thread::spawn( move || {
-        loop {
-            health_checker(backend.clone(), &health_sender, ip);
-            let interval = Duration::from_secs(backend.health_check_interval);
-            thread::sleep(interval);
-        }
-    });
 
     // find local interface we should be listening on
     let interface = match find_interface(lb.listen_ip) {
@@ -563,8 +559,10 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
         }
     };
 
+    let mut arp_cache = Arp::new(interface.clone(), lb.listen_ip).unwrap();
+
     // Create a new channel, dealing with layer 2 packets
-    let (_, mut iface_rx) = match datalink::channel(&interface, Default::default()) {
+    let (mut iface_tx, mut iface_rx) = match datalink::linux::channel(&interface, Default::default()) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Unhandled channel type"),
         Err(e) => panic!("An error occurred when creating the datalink channel: {}", e)
@@ -584,54 +582,130 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
         let thread_rx = incoming_rx.clone();
         let thread_tx = outgoing_tx.clone();
         let thread_sender = sender.clone();
+        let mut thread_arp_cache = arp_cache.clone();
         thread::spawn(move || {
-            process_packets(&mut thread_lb, thread_rx, thread_tx, thread_sender)
+            process_packets(&mut thread_lb, thread_rx, thread_tx, thread_sender, &mut thread_arp_cache)
         });
     }
 
-    // tx thread for sending processed packets back out
+    // start listening before scheduling health checks so we can try catching the ARPs
+    // rx thread for receiving ethernet packets
     thread::spawn(move || {
-        let tx_protocol = Layer3(IpNextHeaderProtocols::Tcp);
-        let (mut tx, _) = match transport_channel(4096, tx_protocol) {
-            Ok((tx, rx)) => (tx, rx),
-            Err(e) => {
-                error!("Error setting up TCP transport channel {}", e);
-                return
-            },
-        };
         loop {
-            match outgoing_rx.recv() {
-                Ok(ip_header) => {
-                    let dst = IpAddr::V4(ip_header.get_destination());
-                    match tx.send_to(ip_header, dst) {
-                       Ok(n) => {
-                           debug!("Sent {} bytes to Server", n);
-                       },
-                       Err(e) => error!("failed to send packet: {}", e),
+            match iface_rx.next() {
+                Ok(packet) => {
+                    let ethernet = EthernetPacket::owned(packet.to_vec()).unwrap();
+                    match incoming_tx.send(ethernet) {
+                        Ok(_) => {},
+                        Err(e) => error!("Error sending ethernet packet to worker on channel {}", e)
                     }
                 }
-                Err(e) => error!("Error processing outgoing packet {:?}", e),
+                Err(e) => {
+                    error!("An error occurred while reading: {}", e);
+                }
             }
         }
     });
 
+    // spawn background health check thread
+    let backend = lb.backend.clone();
+    let health_sender = sender.clone();
+    let ip = lb.listen_ip;
+    thread::spawn( move || {
+        loop {
+            health_checker(backend.clone(), &health_sender, ip);
+            let interval = Duration::from_secs(backend.health_check_interval);
+            thread::sleep(interval);
+        }
+    });
+
+    // make sure we get the default GW HW Address
+    let default_gw = arp_cache.default_gw;
+    let mut default_gw_mac = MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff);
     loop {
-        match iface_rx.next() {
-            Ok(packet) => {
-                let ethernet = EthernetPacket::owned(packet.to_vec()).unwrap();
-                match ethernet.get_ethertype() {
-                    EtherTypes::Ipv4 => {
-                        match incoming_tx.send(ethernet) {
-                            Ok(_) => {},
-                            Err(e) => error!("Error sending ethernet packet to worker on channel {}", e)
-                        }
-                    }
-                    _ => {}
+        // send arp requests for default gateway before we start processing
+        iface_tx.build_and_send(1, 42,
+            &mut |eth_packet| {
+                let mut eth_packet = MutableEthernetPacket::new(eth_packet).unwrap();
+
+                eth_packet.set_destination(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
+                eth_packet.set_source(interface.mac.unwrap());
+                eth_packet.set_ethertype(EtherTypes::Arp);
+
+                let mut arp_buffer = [0u8; 28];
+                let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
+
+                arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+                arp_packet.set_protocol_type(EtherTypes::Ipv4);
+                arp_packet.set_hw_addr_len(6);
+                arp_packet.set_proto_addr_len(4);
+                arp_packet.set_operation(ArpOperations::Request);
+                arp_packet.set_sender_hw_addr(interface.mac.unwrap());
+                arp_packet.set_sender_proto_addr(lb.listen_ip);
+                arp_packet.set_target_hw_addr(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
+                arp_packet.set_target_proto_addr(default_gw);
+
+                eth_packet.set_payload(arp_packet.packet());
+
+                debug!("Sending eth {:?}", eth_packet)
+        });
+        // loop until we've received the arp response from the default gateway
+        let wait = Duration::from_millis(200);
+        thread::sleep(wait);
+        if let Some(mac) = arp_cache.clone().get_default_mac() {
+            default_gw_mac = mac;
+            break
+        }
+        debug!("Sending another ARP request for Default Gateway's HW Addr");
+    }
+
+    // loop in main thread for sending processed packets back out
+    loop {
+        match outgoing_rx.recv() {
+            Ok(ip_header) => {
+                let mut target_mac = default_gw_mac;
+                if let Some(mac_addr) = arp_cache.get_mac(ip_header.get_destination()) {
+                    target_mac = mac_addr;
+                } else {
+                    error!("Target Mac not in cache, sending to default GW instead");
+                    iface_tx.build_and_send(1, 42,
+                        &mut |eth_packet| {
+                            let mut eth_packet = MutableEthernetPacket::new(eth_packet).unwrap();
+
+                            eth_packet.set_destination(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
+                            eth_packet.set_source(interface.mac.unwrap());
+                            eth_packet.set_ethertype(EtherTypes::Arp);
+
+                            let mut arp_buffer = [0u8; 28];
+                            let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
+
+                            arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+                            arp_packet.set_protocol_type(EtherTypes::Ipv4);
+                            arp_packet.set_hw_addr_len(6);
+                            arp_packet.set_proto_addr_len(4);
+                            arp_packet.set_operation(ArpOperations::Request);
+                            arp_packet.set_sender_hw_addr(interface.mac.unwrap());
+                            arp_packet.set_sender_proto_addr(lb.listen_ip);
+                            arp_packet.set_target_hw_addr(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
+                            arp_packet.set_target_proto_addr(ip_header.get_destination());
+
+                            eth_packet.set_payload(arp_packet.packet());
+                    });
                 }
+
+                iface_tx.build_and_send(1, ip_header.packet().len() + ETHERNET_HEADER_LEN,
+                    &mut |eth_packet| {
+                        let mut eth_packet = MutableEthernetPacket::new(eth_packet).unwrap();
+
+                        eth_packet.set_destination(target_mac);
+                        eth_packet.set_source(interface.mac.unwrap());
+                        eth_packet.set_ethertype(EtherTypes::Ipv4);
+                        eth_packet.set_payload(&ip_header.packet());
+
+                        debug!("Sending eth {:?}", eth_packet)
+                });
             }
-            Err(e) => {
-                error!("An error occurred while reading: {}", e);
-            }
+            Err(e) => error!("Error processing outgoing packet {:?}", e),
         }
     }
 }
@@ -649,12 +723,13 @@ mod tests {
     use std::{time};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use self::passthrough::utils::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, build_dummy_eth, build_dummy_ip};
-    use self::passthrough::{Node, process_packets};
+    use self::passthrough::{Node, process_packets, find_interface};
     use pnet::packet::tcp::{TcpPacket, MutableTcpPacket};
     use pnet::packet::ipv4::{MutableIpv4Packet};
     use pnet::packet::ethernet::EthernetPacket;
     use pnet::packet::Packet;
     use crossbeam_channel::unbounded;
+    use self::passthrough::arp::Arp;
 
     fn update_config(filename: &str, word_from: String, word_to: String) {
         let mut src = File::open(&filename).unwrap();
@@ -863,15 +938,19 @@ mod tests {
         let srv = passthrough::Server::new(conf, false);
         let lb = srv.lbs[0].clone();
 
+        let lb_ip = "127.0.0.1".parse().unwrap();
+        let interface = find_interface(lb_ip).unwrap();
+        let mut arp_cache = Arp::new(interface, lb_ip).unwrap();
+
         let (incoming_tx, incoming_rx) = unbounded();
         let (outgoing_tx, outgoing_rx) = channel();
         let (stats_tx, _) = channel();
         let mut thread_lb = lb.clone();
         thread::spawn(move || {
-            process_packets(&mut thread_lb, incoming_rx, outgoing_tx, stats_tx);
+            process_packets(&mut thread_lb, incoming_rx, outgoing_tx, stats_tx, &mut arp_cache);
         });
 
-        let lb_ip = "127.0.0.1".parse().unwrap();
+
         let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
         let backend_srv_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
 
@@ -921,15 +1000,19 @@ mod tests {
         let srv = passthrough::Server::new(conf, true);
         let lb = srv.lbs[0].clone();
 
+        let lb_ip = "127.0.0.1".parse().unwrap();
+        let interface = find_interface(lb_ip).unwrap();
+        let mut arp_cache = Arp::new(interface, lb_ip).unwrap();
+
+        let lb_ip = "127.0.0.1".parse().unwrap();
         let (incoming_tx, incoming_rx) = unbounded();
         let (outgoing_tx, outgoing_rx) = channel();
         let (stats_tx, _) = channel();
         let mut thread_lb = lb.clone();
         thread::spawn(move || {
-            process_packets(&mut thread_lb, incoming_rx, outgoing_tx, stats_tx);
+            process_packets(&mut thread_lb, incoming_rx, outgoing_tx, stats_tx, &mut arp_cache);
         });
 
-        let lb_ip = "127.0.0.1".parse().unwrap();
         let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
         let backend_srv_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
 
