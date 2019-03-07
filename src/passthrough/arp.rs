@@ -1,11 +1,11 @@
 extern crate pnet;
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::net::{Ipv4Addr};
 use pnet::util::MacAddr;
 use pnet::datalink::{NetworkInterface};
 use ipnetwork::{IpNetwork, Ipv4Network};
-use pnet::packet::arp::{ ArpOperations, ArpPacket};
+use pnet::packet::arp::{ArpOperations, ArpPacket};
 
 use pnet::packet::{Packet};
 use pnet::packet::ethernet::{EthernetPacket};
@@ -21,7 +21,7 @@ pub struct Arp {
 
 struct Table {
     default_gw_mac: Option<MacAddr>,
-    cache: BTreeMap<Ipv4Addr, MacAddr>,
+    cache: HashMap<Ipv4Addr, MacAddr>,
 }
 
 impl Arp {
@@ -37,7 +37,7 @@ impl Arp {
         if let IpNetwork::V4(ipv4_net) = local_net {
             let tb = Table{
                 default_gw_mac: None,
-                cache: BTreeMap::new(),
+                cache: HashMap::new(),
             };
             return Some(Arp {
                     local: interface.mac.unwrap(),
