@@ -2,10 +2,10 @@ extern crate pnet;
 extern crate pnet_macros_support;
 extern crate lru_time_cache;
 
-use self::backend::{Backend, ServerPool, Node, health_checker};
+use self::backend::{Backend, ServerPool, health_checker};
 use self::arp::Arp;
 use self::lb::{LB, Client, Connection};
-use self::utils::{find_interface, EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, ETHERNET_HEADER_LEN};
+use self::utils::{find_interface, EPHEMERAL_PORT_LOWER, ETHERNET_HEADER_LEN};
 
 use crate::config::{Config, BaseConfig};
 use crate::stats::StatsMssg;
@@ -331,7 +331,7 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
 
     // make sure we get the default GW HW Address
     let default_gw = arp_cache.default_gw;
-    let mut default_gw_mac = MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff);
+    let default_gw_mac: MacAddr;
     loop {
         // send arp requests for default gateway before we start processing
         iface_tx.build_and_send(1, 42,

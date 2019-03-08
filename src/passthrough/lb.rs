@@ -3,30 +3,18 @@ extern crate pnet_macros_support;
 extern crate lru_time_cache;
 use crate::passthrough;
 
-use self::passthrough::backend::{Backend, ServerPool, Node, health_checker};
-use self::passthrough::arp::Arp;
-use crate::config::{Config, BaseConfig};
+use self::passthrough::backend::{Backend, Node};
 use crate::stats::StatsMssg;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::tcp::{MutableTcpPacket};
 use pnet::packet::{tcp, Packet};
 use pnet::packet::ipv4::{checksum, Ipv4Packet, MutableIpv4Packet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use pnet::datalink::{self, NetworkInterface};
-use pnet::util::MacAddr;
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
-use pnet::packet::arp::{MutableArpPacket, ArpOperations, ArpHardwareTypes};
-use pnet::datalink::Channel::Ethernet;
 use std::sync::{Arc, Mutex, RwLock};
-use std::str::FromStr;
-use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc::Sender;
 use std::collections::HashMap;
-use std::{thread};
 use lru_time_cache::LruCache;
-use std::time::Duration;
-use crossbeam_channel::unbounded;
-use std::sync::mpsc::channel;
-use self::passthrough::utils::{IPV4_HEADER_LEN, EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, ETHERNET_HEADER_LEN};
+use self::passthrough::utils::{IPV4_HEADER_LEN, EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER};
 
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
