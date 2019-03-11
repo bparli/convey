@@ -18,7 +18,7 @@ Layer 4 load balancer with dynamic configuration loading featuring proxy, passth
 
 ## Usage
 ```
-Convey 0.2.1
+Convey 0.2.2
 
 Usage:
   convey

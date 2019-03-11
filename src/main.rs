@@ -14,7 +14,7 @@ use docopt::Docopt;
 use self::config::Config;
 
 const USAGE: &'static str = "
-Convey 0.2.1
+Convey 0.2.2
 
 Usage:
   convey
