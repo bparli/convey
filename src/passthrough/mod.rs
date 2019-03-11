@@ -2,17 +2,17 @@ extern crate pnet;
 extern crate pnet_macros_support;
 extern crate lru_time_cache;
 
-use self::backend::{Backend, ServerPool, health_checker};
+use self::backend::{ServerPool, health_checker};
 use self::arp::Arp;
-use self::lb::{LB, Client, Connection};
-use self::utils::{find_interface, EPHEMERAL_PORT_LOWER, ETHERNET_HEADER_LEN};
+use self::lb::{LB, Connection};
+use self::utils::{find_interface, ETHERNET_HEADER_LEN};
 
 use crate::config::{Config, BaseConfig};
 use crate::stats::StatsMssg;
 use pnet::packet::tcp::{MutableTcpPacket};
 use pnet::packet::{Packet};
 use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{ SocketAddr};
 use pnet::datalink::{self};
 use pnet::util::MacAddr;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
@@ -47,72 +47,9 @@ pub struct Server {
 impl Server {
     pub fn new(config: Config, dsr: bool) -> Server {
         let mut lbs = Vec::new();
-        for (name,front) in config.base.frontends.iter() {
-            let mut backend_servers = HashMap::new();
-
-            // Set defaults
-            let mut health_check_interval = 5;
-            let mut connection_tracker_capacity = 1000 as usize;
-            let mut workers = 4 as usize;
-            let mut stats_update_frequency = 5;
-
-            match config.base.passthrough {
-                Some(setting) => {
-                    connection_tracker_capacity = setting.connection_tracker_capacity;
-                    if let Some(num) = setting.workers {
-                        workers = num;
-                    }
-                    if let Some(freq) = setting.stats_update_frequency {
-                        stats_update_frequency = freq;
-                    }
-                },
-                None => {},
-            }
-
-            match config.base.backends.get(&front.backend) {
-                Some(back) => {
-                    for (_,addr) in &back.servers {
-                        let listen_addr: SocketAddr = FromStr::from_str(&addr.addr)
-                                          .ok()
-                                          .expect("Failed to parse listen host:port string");
-                        backend_servers.insert(listen_addr, addr.weight);
-                    }
-                    if back.health_check_interval > 0 {
-                        health_check_interval = back.health_check_interval;
-                    }
-                }
-                None => {
-                    error!("Error finding backend server pool in config: {} not found on backend config", front.backend);
-                    continue
-                },
-            };
-
-            if backend_servers.len() > 0 {
-                let listen_addr: SocketAddr = FromStr::from_str(&front.listen_addr)
-                                  .ok()
-                                  .expect("Failed to parse listen host:port string");
-
-                let backend = Arc::new(Backend::new(front.backend.clone(), backend_servers, health_check_interval));
-                match listen_addr.ip() {
-                    IpAddr::V4(ip4) => {
-                        let new_lb = LB {
-                            name: name.clone(),
-                            listen_ip: ip4,
-                            listen_port: listen_addr.port(),
-                            backend: backend.clone(),
-                            conn_tracker: Arc::new(RwLock::new(LruCache::<Client, Connection>::with_capacity(connection_tracker_capacity))),
-                            port_mapper: Arc::new(RwLock::new(HashMap::new())),
-                            next_port: Arc::new(Mutex::new(EPHEMERAL_PORT_LOWER)),
-                            workers: workers,
-                            dsr: dsr,
-                            stats_update_frequency: stats_update_frequency,
-                        };
-                        lbs.push(new_lb);
-                    }
-                    _ => error!("Unable to configure load balancer server {:?}.  Only Ipv4 is supported", front),
-                }
-            } else {
-                error!("Unable to configure load balancer server {:?}", front);
+        for (name, _) in config.base.frontends.iter() {
+            if let Some(new_lb) = LB::new(name.to_string(), config.clone(), dsr) {
+                lbs.push(new_lb);
             }
         }
         Server {lbs: lbs, config_rx: config.subscribe()}
@@ -432,8 +369,9 @@ mod tests {
     use std::io::{Read, Write};
     use std::{time};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use self::passthrough::utils::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, build_dummy_eth, build_dummy_ip};
-    use self::passthrough::{Node, process_packets, find_interface};
+    use self::passthrough::utils::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, build_dummy_ip, build_dummy_eth};
+    use self::passthrough::backend::Node;
+    use self::passthrough::{process_packets, find_interface};
     use pnet::packet::tcp::{TcpPacket, MutableTcpPacket};
     use pnet::packet::ipv4::{MutableIpv4Packet};
     use pnet::packet::ethernet::EthernetPacket;
@@ -518,127 +456,6 @@ mod tests {
 
         // reset fixture
         update_config("testdata/passthrough_test.toml", "6.6.6.6:3080".to_string(), "127.0.0.1:3080".to_string());
-    }
-
-    #[test]
-    fn test_passthrough_next_port() {
-        let conf = Config::new("testdata/passthrough_test.toml").unwrap();
-        let srv = passthrough::Server::new(conf, false);
-        let mut lb = srv.lbs[0].clone();
-
-        let first_port = lb.next_avail_port();
-        assert_eq!(*lb.next_port.lock().unwrap(), first_port);
-        assert_eq!(lb.next_avail_port(), first_port + 1);
-        *lb.next_port.lock().unwrap() = EPHEMERAL_PORT_UPPER + 1;
-        assert_eq!(lb.next_avail_port(), EPHEMERAL_PORT_LOWER);
-    }
-
-    #[test]
-    fn test_passthrough_server_response() {
-        let conf = Config::new("testdata/passthrough_test.toml").unwrap();
-        let srv = passthrough::Server::new(conf, false);
-        let mut lb = srv.lbs[0].clone();
-
-        let (tx, rx) = channel();
-        let lb_ip = "127.0.0.1".parse().unwrap();
-        let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
-        let backend_srv_ip: Ipv4Addr = "8.8.8.8".parse().unwrap();
-
-        // simulate response from server at port 80 to local (ephemeral) port 35000
-        let resp_header = build_dummy_ip(backend_srv_ip, lb_ip, 80, 35000);
-        let mut tcp_header = MutableTcpPacket::owned(resp_header.payload().to_owned()).unwrap();
-        // server should respond to client ip at client's port
-        lb.server_response_handler(&resp_header.to_immutable(), &mut tcp_header, &SocketAddr::new(IpAddr::V4(client_ip), 55000), tx);
-        let srv_resp: MutableIpv4Packet = rx.recv().unwrap();
-        assert_eq!(srv_resp.get_destination(), client_ip);
-        assert_eq!(srv_resp.get_source(), lb_ip);
-
-        let tcp_resp = TcpPacket::new(srv_resp.payload()).unwrap();
-        assert_eq!(tcp_resp.get_destination(), 55000);
-        assert_eq!(tcp_resp.get_source(), 3000);
-    }
-
-    #[test]
-    fn test_passthrough_client() {
-        // load the loadbalancer
-        let conf = Config::new("testdata/passthrough_test.toml").unwrap();
-        let srv = passthrough::Server::new(conf, false);
-        let mut lb = srv.lbs[0].clone();
-
-        let (tx, rx) = channel();
-        let lb_ip = "127.0.0.1".parse().unwrap();
-        let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
-        let backend_srv_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
-
-        {
-            // set a backend server to healthy
-            let mut srvs_map = lb.backend.servers_map.write().unwrap();
-            let mut srvs_ring = lb.backend.ring.lock().unwrap();
-            let health = srvs_map.get_mut(&SocketAddr::new(IpAddr::V4(backend_srv_ip), 3080)).unwrap();
-            *health = true;
-            srvs_ring.add_node(&Node{host: IpAddr::V4(backend_srv_ip), port: 3080})
-        }
-
-        // gen test ip/tcp packet with simulated client
-        let req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
-        let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
-
-        // call client_handler and verify packet being sent out to healthy backend server
-        lb.client_handler(&mut req_header.to_immutable(), &mut tcp_header, tx.clone());
-        let fwd_pkt: MutableIpv4Packet = rx.recv().unwrap();
-        assert_eq!(fwd_pkt.get_destination(), backend_srv_ip);
-        assert_eq!(fwd_pkt.get_source(), lb_ip);
-
-        let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
-        assert_eq!(tcp_resp.get_destination(), 3080);
-        assert_eq!(tcp_resp.get_source(), EPHEMERAL_PORT_LOWER + 1);
-
-        {
-            // check connection is being tracked
-            let port_mp = lb.port_mapper.read().unwrap();
-            let cli = port_mp.get(&(EPHEMERAL_PORT_LOWER + 1)).unwrap();
-
-            let mut test_lb = lb.conn_tracker.write().unwrap();
-            let conn = test_lb.get(&cli).unwrap();
-            assert_eq!(conn.ephem_port, EPHEMERAL_PORT_LOWER + 1);
-            assert_eq!(conn.client, SocketAddr::new(IpAddr::V4(client_ip), 43000));
-        }
-
-        {
-            assert_eq!(lb.conn_tracker.read().unwrap().len(), 1);
-        }
-
-        {
-            // check same client again to verify connection tracker is used
-            let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
-            lb.client_handler(&mut req_header.to_immutable(), &mut tcp_header, tx.clone());
-            // next port should not have incremented
-            assert_eq!(*lb.next_port.lock().unwrap(), EPHEMERAL_PORT_LOWER + 1);
-
-            let fwd_pkt: MutableIpv4Packet = rx.recv().unwrap();
-            assert_eq!(fwd_pkt.get_destination(), backend_srv_ip);
-            assert_eq!(fwd_pkt.get_source(), lb_ip);
-
-            let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
-            assert_eq!(tcp_resp.get_destination(), 3080);
-            assert_eq!(tcp_resp.get_source(), EPHEMERAL_PORT_LOWER + 1);
-            assert_eq!(lb.conn_tracker.read().unwrap().len(), 1);
-        }
-
-        {
-            // set backend server to unhealthy
-            let mut srvs_map = lb.backend.servers_map.write().unwrap();
-            let mut srvs_ring = lb.backend.ring.lock().unwrap();
-            let health = srvs_map.get_mut(&SocketAddr::new(IpAddr::V4(backend_srv_ip), 3080)).unwrap();
-            *health = false;
-            srvs_ring.remove_node(&Node{host: IpAddr::V4(backend_srv_ip), port: 3080})
-        }
-
-        // check same client again to verify connection is failed
-        let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
-        lb.client_handler(&mut req_header.to_immutable(), &mut tcp_header, tx.clone());
-        // since there are not healthy backend servers there should be no connections added to map
-        assert_eq!(lb.conn_tracker.read().unwrap().len(), 0);
     }
 
     #[test]

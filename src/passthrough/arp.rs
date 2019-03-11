@@ -89,3 +89,64 @@ impl Arp {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use self::passthrough::find_interface;
+    use crate::passthrough;
+    use std::net::{IpAddr, Ipv4Addr};
+    use self::passthrough::utils::find_local_addr;
+    use pnet::util::MacAddr;
+    use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
+    use pnet::packet::arp::{MutableArpPacket, ArpOperations, ArpHardwareTypes};
+    use pnet::packet::{Packet};
+
+    #[test]
+    fn test_new_arp() {
+        let ip4: Ipv4Addr = "127.0.0.1".parse().unwrap();
+        let interface = find_interface(ip4).unwrap();
+        let test_arp = passthrough::arp::Arp::new(interface, ip4).unwrap();
+        assert_eq!(test_arp.network.nth(1).unwrap(), ip4);
+    }
+
+    #[test]
+    fn test_handle_arp() {
+        if let Some(local_ip) = find_local_addr() {
+            match local_ip {
+                IpAddr::V4(ip4) => {
+                    let interface = find_interface(ip4).unwrap();
+                    let mut test_arp = passthrough::arp::Arp::new(interface, ip4).unwrap();
+
+                    // Setup Ethernet header
+                    let ethbuf: Vec<u8> = vec!(0; 42);
+                    let mut eth_header = MutableEthernetPacket::owned(ethbuf).unwrap();
+
+                    eth_header.set_destination(MacAddr::new(255, 255, 255, 255, 255, 255));
+                    eth_header.set_source(MacAddr::new(255, 255, 255, 255, 255, 255));
+                    eth_header.set_ethertype(EtherTypes::Arp);
+
+                    let mut arp_buffer = [0u8; 28];
+                    let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
+
+                    arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+                    arp_packet.set_protocol_type(EtherTypes::Ipv4);
+                    arp_packet.set_hw_addr_len(6);
+                    arp_packet.set_proto_addr_len(4);
+                    arp_packet.set_operation(ArpOperations::Reply);
+                    arp_packet.set_sender_hw_addr(MacAddr::new(255, 255, 255, 255, 255, 255));
+                    arp_packet.set_sender_proto_addr(ip4);
+                    arp_packet.set_target_hw_addr(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
+                    arp_packet.set_target_proto_addr(ip4);
+
+                    eth_header.set_payload(arp_packet.packet());
+
+                    test_arp.handle_arp(&eth_header.to_immutable());
+
+                    assert_eq!(test_arp.get_mac(ip4).unwrap(), MacAddr::new(255, 255, 255, 255, 255, 255));
+                }
+                _ => { assert!(false) }
+            }
+        } else {
+            assert!(false)
+        }
+    }
+}
