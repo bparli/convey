@@ -6,7 +6,7 @@ use pnet::packet::{tcp, Packet};
 use pnet::packet::ipv4::{MutableIpv4Packet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
-use pnet::datalink::MacAddr;
+use pnet::datalink::{linux, MacAddr, NetworkInterface};
 use socket2::{Socket, Domain, Type, SockAddr};
 
 // health ports are reserved for health checks
@@ -19,7 +19,7 @@ pub const ETHERNET_HEADER_LEN: usize = 14;
 pub const IPV4_HEADER_LEN: usize = 20;
 pub const TCP_HEADER_LEN: usize = 32;
 
-fn find_local_addr() -> Option<IpAddr> {
+pub fn find_local_addr() -> Option<IpAddr> {
     for iface in pnet::datalink::interfaces() {
         if !iface.is_loopback() {
             for ipnet in iface.ips {
@@ -98,4 +98,16 @@ pub fn allocate_socket(listen_ip: Ipv4Addr) -> Option<Socket> {
     }
     error!("Unable to allocate local port from range {} - {}", HEALTH_PORT_LOWER, HEALTH_PORT_UPPER);
     None
+}
+
+pub fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
+    let interfaces = linux::interfaces();
+    for interface in interfaces {
+        for ip in interface.clone().ips {
+            if ip.ip() == addr {
+                return Some(interface)
+            }
+        }
+    }
+    return None
 }
