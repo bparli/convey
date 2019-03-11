@@ -4,7 +4,7 @@ extern crate lru_time_cache;
 
 use self::backend::{ServerPool, health_checker};
 use self::arp::Arp;
-use self::lb::{LB, Connection};
+use self::lb::{LB};
 use self::utils::{find_interface, ETHERNET_HEADER_LEN};
 
 use crate::config::{Config, BaseConfig};
@@ -18,12 +18,10 @@ use pnet::util::MacAddr;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::arp::{MutableArpPacket, ArpOperations, ArpHardwareTypes};
 use pnet::datalink::Channel::Ethernet;
-use std::sync::{Arc, Mutex, RwLock};
 use std::str::FromStr;
 use std::sync::mpsc::{Sender, Receiver};
 use std::collections::HashMap;
 use std::{thread};
-use lru_time_cache::LruCache;
 use std::time::Duration;
 use crossbeam_channel::unbounded;
 use std::sync::mpsc::channel;
@@ -369,7 +367,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::{time};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use self::passthrough::utils::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, build_dummy_ip, build_dummy_eth};
+    use self::passthrough::utils::{EPHEMERAL_PORT_LOWER, build_dummy_ip, build_dummy_eth};
     use self::passthrough::backend::Node;
     use self::passthrough::{process_packets, find_interface};
     use pnet::packet::tcp::{TcpPacket, MutableTcpPacket};

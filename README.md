@@ -18,7 +18,7 @@ Layer 4 load balancer with dynamic configuration loading featuring proxy, passth
 
 ## Usage
 ```
-Convey 0.2.0
+Convey 0.2.1
 
 Usage:
   convey
@@ -44,7 +44,7 @@ For passthrough mode we need a couple iptables rules on the convey load balancer
 ![passthrough](https://docs.google.com/drawings/d/e/2PACX-1vS1umK8iY4EryR0hV4s1lad2r5BrO4_nbFTCua9jqkPP7fSQXodXCZ8XD7kvkfeXxdphtMFczIij-K1/pub?w=581&h=326)
 
 For passthrough mode on the convey load balancer
-``` 
+```
 sudo iptables -t raw -A PREROUTING -p tcp --dport <LOAD_BALANCER_PORT> -j DROP
 sudo iptables -t raw -A PREROUTING -p tcp --sport <BACKEND_SERVER_PORT> --dport 33768:61000 -j DROP
 ```
@@ -73,14 +73,14 @@ sudo tc qdisc add dev enp0s8 root handle 10: htb
 sudo tc filter add dev enp0s8 parent 10: protocol ip prio 1 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff match ip dst <LOAD_BALANCER_IP> action ok
 
 sudo tc filter add dev enp0s8 parent 10: protocol ip prio 10 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff action nat egress 192.168.1.117 <LOAD_BALANCER_IP>
-``` 
+```
 
 To run
 ```
 sudo ./target/release/convey --dsr --config=sample-passthrough.toml
 ```
 
-### Proxy 
+### Proxy
 No special setup neccessary
 
 ![proxy](https://docs.google.com/drawings/d/e/2PACX-1vQC7fAvVEs0Xb0kcAFfCLIVukhkIrlu-DS_tbrtgpRonmsHO9STpnXvI7NogXiBVUON9gS-L4MLqYV2/pub?w=581&h=326)
@@ -102,4 +102,3 @@ sudo ~/.cargo/bin/cargo test
 <!-- references -->
 [tokio]: https://tokio.rs
 [Traffic Control]: http://tldp.org/HOWTO/Traffic-Control-HOWTO/index.html
-
