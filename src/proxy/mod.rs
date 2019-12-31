@@ -61,18 +61,13 @@ impl Server {
                                   .ok()
                                   .expect("Failed to parse listen host:port string");
 
-                match Backend::new(front.backend.clone(), backend_servers, health_check_interval) {
-                    Ok(backend) => {
-                        let new_lb = Proxy {
-                            name: name.clone(),
-                            listen_addr: listen_addr,
-                            backend: Arc::new(backend),
-                        };
-                        new_server.proxies.push(Arc::new(new_lb));
-                    }
-                    Err(e) => error!("Unable to add backend to proxy: {:?}", e),
-                }
-
+                let backend = Backend::new(front.backend.clone(), backend_servers, health_check_interval);
+                let new_lb = Proxy {
+                    name: name.clone(),
+                    listen_addr: listen_addr,
+                    backend: Arc::new(backend),
+                };
+                new_server.proxies.push(Arc::new(new_lb));
             } else {
                 error!("Unable to configure load balancer server {:?}", front);
             }
@@ -82,7 +77,6 @@ impl Server {
 
     // wait on config changes to update backend server pool
     fn config_sync(&mut self) {
-        let proxies = self.proxies.clone();
         loop {
             match self.rx.recv() {
                 Ok(new_config) => {
@@ -95,16 +89,12 @@ impl Server {
                                               .expect("Failed to parse listen host:port string");
                             backend_servers.insert(listen_addr, server.weight);
                         }
-                        match ServerPool::new_servers(backend_servers) {
-                            Ok(new_server_pool) => {
-                                for proxy in proxies.iter() {
-                                    if proxy.backend.name == backend_name {
-                                        info!("Updating backend {} with {:?}", backend_name, new_server_pool);
-                                        *proxy.backend.servers.write().unwrap() = new_server_pool.clone();
-                                    }
-                                }
+                        let new_server_pool = ServerPool::new_servers(backend_servers);
+                        for proxy in self.proxies.iter() {
+                            if proxy.backend.name == backend_name {
+                                info!("Updating backend {} with {:?}", backend_name, new_server_pool);
+                                *proxy.backend.servers.write().unwrap() = new_server_pool.clone();
                             }
-                            Err(e) => error!("Unable to update server configurations: {:?}", e)
                         }
                     }
                 }
