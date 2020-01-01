@@ -1,28 +1,26 @@
 extern crate tokio;
 
-use std::sync::{Arc, Mutex};
-use std::net::{Shutdown, SocketAddr};
-use std::io::{self, Read, Write};
+use std::sync::Arc;
+use std::net::SocketAddr;
 use std::str::FromStr;
-use tokio::io::{copy, shutdown};
+use futures::future::try_join;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::io;
 use tokio::prelude::*;
-use tokio::timer::Interval;
-use std::time::{Duration, Instant};
-use futures::future::lazy;
 use std::sync::mpsc::{Sender, Receiver};
 use std::collections::HashMap;
-use std::thread;
 
 mod backend;
 
-use self::backend::{Backend, ServerPool, health_checker, get_next};
+use self::backend::{Backend, ServerPool, run_health_checker, get_next};
 use crate::config::{Config, BaseConfig};
 use crate::stats::StatsMssg;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Server {
-    pub proxies: Vec<Proxy>,
+    pub proxies: Vec<Arc<Proxy>>,
+
+    rx: Receiver<BaseConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,7 +34,8 @@ pub struct Proxy {
 
 impl Server {
     pub fn new(config: Config) -> Server {
-        let mut new_server = Server {proxies: Vec::new()};
+        let rcvr = config.clone().subscribe();
+        let mut new_server = Server{proxies: Vec::new(), rx: rcvr };
         for (name,front) in config.base.frontends.iter() {
             let mut backend_servers = HashMap::new();
             let mut health_check_interval = 5;
@@ -62,195 +61,160 @@ impl Server {
                                   .ok()
                                   .expect("Failed to parse listen host:port string");
 
-                let backend = Arc::new(Backend::new(front.backend.clone(), backend_servers, health_check_interval));
+                let backend = Backend::new(front.backend.clone(), backend_servers, health_check_interval);
                 let new_lb = Proxy {
                     name: name.clone(),
                     listen_addr: listen_addr,
-                    backend: backend.clone(),
+                    backend: Arc::new(backend),
                 };
-                new_server.proxies.push(new_lb);
+                new_server.proxies.push(Arc::new(new_lb));
             } else {
                 error!("Unable to configure load balancer server {:?}", front);
             }
         }
-
-        let rx = config.subscribe();
-        new_server.config_sync(rx);
         new_server
     }
 
     // wait on config changes to update backend server pool
-    fn config_sync(&mut self, rx: Receiver<BaseConfig>) {
-        let proxies = self.proxies.clone();
-        thread::spawn( move || {
-            loop {
-                match rx.recv() {
-                    Ok(new_config) => {
-                        debug!("Config file watch event. New config: {:?}", new_config);
-                        for (backend_name, backend) in new_config.backends {
-                            let mut backend_servers = HashMap::new();
-                            for (_, server) in backend.servers {
-                                let listen_addr: SocketAddr = FromStr::from_str(&server.addr)
-                                                  .ok()
-                                                  .expect("Failed to parse listen host:port string");
-                                backend_servers.insert(listen_addr, server.weight);
-                            }
-                            let new_server_pool = ServerPool::new_servers(backend_servers);
-                            for proxy in proxies.iter() {
-                                if proxy.backend.name == backend_name {
-                                    info!("Updating backend {} with {:?}", backend_name, new_server_pool);
-                                    *proxy.backend.servers.write().unwrap() = new_server_pool.clone();
-                                }
+    fn config_sync(&mut self) {
+        loop {
+            match self.rx.recv() {
+                Ok(new_config) => {
+                    debug!("Config file watch event. New config: {:?}", new_config);
+                    for (backend_name, backend) in new_config.backends {
+                        let mut backend_servers = HashMap::new();
+                        for (_, server) in backend.servers {
+                            let listen_addr: SocketAddr = FromStr::from_str(&server.addr)
+                                              .ok()
+                                              .expect("Failed to parse listen host:port string");
+                            backend_servers.insert(listen_addr, server.weight);
+                        }
+                        let new_server_pool = ServerPool::new_servers(backend_servers);
+                        for proxy in self.proxies.iter() {
+                            if proxy.backend.name == backend_name {
+                                info!("Updating backend {} with {:?}", backend_name, new_server_pool);
+                                *proxy.backend.servers.write().unwrap() = new_server_pool.clone();
                             }
                         }
                     }
-                    Err(e) => error!("watch error: {:?}", e),
                 }
+                Err(e) => error!("watch error: {:?}", e),
             }
-        });
-    }
-
-    pub fn run(self, sender: Sender<StatsMssg>) {
-        tokio::run(lazy( move || {
-            for proxy in self.proxies.iter() {
-                match run_server(proxy.clone(), sender.clone()) {
-                    Ok(_) => {},
-                    Err(e) => error!("Error binding to socket {}", e),
-                }
-            }
-            Ok(())
-        }));
-    }
-}
-
-fn run_server(lb: Proxy, sender: Sender<StatsMssg>) -> Result<(), Box<std::error::Error>>{
-    debug!("Listening on: {:?}", lb.listen_addr);
-    debug!("Proxying to: {:?}", lb.backend);
-    match TcpListener::bind(&lb.listen_addr) {
-        Ok(socket) => {
-
-            // schedule health checker
-            let back = lb.backend.clone();
-            let time = back.health_check_interval;
-            let timer_sender = sender.clone();
-            let task = Interval::new(Instant::now(), Duration::from_secs(time))
-                .for_each(move |instant| {
-                    health_checker(back.clone(), &timer_sender);
-                    debug!("Running backend health checker{:?}", instant);
-                    Ok(())
-                })
-                .map_err(|e| panic!("interval errored; err={:?}", e));
-            tokio::spawn(task);
-
-            let done = socket.incoming()
-                .map_err(|e| error!("error accepting socket; error = {:?}", e))
-                .for_each(move |client| {
-
-                    let server_addr = get_next(lb.backend.clone());
-                    let server = server_addr.and_then(move |server_addr| {
-                        TcpStream::connect(&server_addr)
-                    });
-
-                    // update stats connections
-                    let mssg = StatsMssg{frontend: Some(lb.name.clone()),
-                                        backend: lb.backend.name.clone(),
-                                        connections: 1,
-                                        bytes_tx: 0,
-                                        bytes_rx: 0,
-                                        servers: None};
-                    match sender.send(mssg) {
-                        Ok(_) => {},
-                        Err(e) => error!("Error sending stats message on channel: {}", e)
-                    }
-
-                    let amounts = server.and_then(move |server| {
-                        let client_reader = MyTcpStream(Arc::new(Mutex::new(client)));
-                        let client_writer = client_reader.clone();
-                        let server_reader = MyTcpStream(Arc::new(Mutex::new(server)));
-                        let server_writer = server_reader.clone();
-
-                        // Copy the data (in parallel) between the client and the server.
-                        // After the copy is done we indicate to the remote side that we've
-                        // finished by shutting down the connection.
-                        let client_to_server = copy(client_reader, server_writer)
-                            .and_then(|(n, _, server_writer)| {
-                                shutdown(server_writer).map(move |_| n)
-                            });
-
-                        let server_to_client = copy(server_reader, client_writer)
-                            .and_then(|(n, _, client_writer)| {
-                                shutdown(client_writer).map(move |_| n)
-                            });
-
-                        client_to_server.join(server_to_client)
-                    });
-
-                    let thread_sender = sender.clone();
-                    let frontend_name = lb.name.clone();
-                    let backend_name = lb.backend.name.clone();
-                    let msg = amounts.map(move |(from_client, from_server)| {
-                        debug!("client wrote {} bytes and received {} bytes",
-                                 from_client, from_server);
-
-                        // update stats connections and bytes
-                        let mssg = StatsMssg{
-                                        frontend: Some(frontend_name),
-                                        backend: backend_name,
-                                        connections: -1,
-                                        bytes_tx: from_client,
-                                        bytes_rx: from_server,
-                                        servers: None};
-                        match thread_sender.send(mssg) {
-                            Ok(_) => {},
-                            Err(e) => error!("Error sending stats message on channel: {}", e)
-                        }
-                    }).map_err(|e| {
-                        // Don't panic. Maybe the client just disconnected too soon.
-                        error!("error: {}", e);
-                    });
-
-                    tokio::spawn(msg);
-                    Ok(())
-                });
-            tokio::spawn(done);
-            Ok(())
         }
-        Err(e) => Result::Err(Box::new(e))
-    }
-}
-
-// From tokio proxy example
-// This is a custom type used to have a custom implementation of the
-// `AsyncWrite::shutdown` method which actually calls `TcpStream::shutdown` to
-// notify the remote end that we're done writing.
-#[derive(Clone)]
-struct MyTcpStream(Arc<Mutex<TcpStream>>);
-
-impl Read for MyTcpStream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().read(buf)
-    }
-}
-
-impl Write for MyTcpStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().write(buf)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
+    #[tokio::main]
+    pub async fn run(&mut self, sender: Sender<StatsMssg>) -> Result<(), Box<dyn std::error::Error>> {
+        let proxies = self.proxies.clone();
+
+        for proxy in proxies.iter() {
+            // start background health checker for this proxy
+            let health_sender = sender.clone();
+            let back = proxy.backend.clone();
+            tokio::spawn(async move {
+                if let Err(e) = run_health_checker(back, health_sender).await {
+                    error!("Error running health checker {}", e);
+                    return;
+                }
+            });
+
+            let srv_sender = sender.clone();
+            let p = proxy.clone();
+            tokio::spawn(async move {
+                if let Err(e) = run_server(p.clone(), srv_sender).await {
+                    error!("Error running proxy server {}: {:?}", e, p);
+                    return;
+                }
+            });
+        }
+        self.config_sync();
         Ok(())
     }
 }
 
-impl AsyncRead for MyTcpStream {}
+async fn run_server(lb: Arc<Proxy>, sender: Sender<StatsMssg>) -> Result<(), Box<dyn std::error::Error>>{
+    debug!("Listening on: {:?}", lb.listen_addr);
+    debug!("Proxying to: {:?}", lb.backend);
 
-impl AsyncWrite for MyTcpStream {
-    fn shutdown(&mut self) -> Poll<(), io::Error> {
-        (self.0.lock().unwrap().shutdown(Shutdown::Write))?;
-        Ok(().into())
+    let mut listener = TcpListener::bind(&lb.listen_addr).await?;
+
+    while let Ok((inbound, _)) = listener.accept().await {
+        // clones for async thread
+        let sdr = sender.clone();
+        let thread_lb = lb.clone();
+
+        // and clones for updating stats thread in error condition
+        let err_lb = lb.clone();
+        let err_sdr = sender.clone();
+
+        tokio::spawn( async move {
+            if let Err(e) = process(inbound, sdr, thread_lb).await {
+                error!("Failed to process tcp request; error={}", e);
+                // update stats connections
+                let mssg = StatsMssg{frontend: Some(err_lb.name.clone()),
+                                    backend: err_lb.backend.name.clone(),
+                                    connections: -1,
+                                    bytes_tx: 0,
+                                    bytes_rx: 0,
+                                    servers: None};
+                match err_sdr.send(mssg) {
+                    Ok(_) => {},
+                    Err(e) => error!("Error sending stats message on channel: {}", e)
+                }
+            }
+        });
     }
+    Ok(())
 }
 
+async fn process(mut inbound: TcpStream, sender: Sender<StatsMssg>,
+    lb: Arc<Proxy>) -> Result<(), Box<dyn std::error::Error>> {
+
+    // update stats connections
+    let mssg = StatsMssg{frontend: Some(lb.name.clone()),
+                        backend: lb.backend.name.clone(),
+                        connections: 1,
+                        bytes_tx: 0,
+                        bytes_rx: 0,
+                        servers: None};
+    match sender.send(mssg) {
+        Ok(_) => {},
+        Err(e) => error!("Error sending stats message on channel: {}", e)
+    }
+
+    match get_next(lb.backend.clone()) {
+        Some(server_addr) => {
+            let mut server = TcpStream::connect(&server_addr).await?;
+
+            let (mut ri, mut wi) = inbound.split();
+            let (mut ro, mut wo) = server.split();
+
+            let client_to_server = io::copy(&mut ri, &mut wo);
+            let server_to_client = io::copy(&mut ro, &mut wi);
+
+            let (bytes_tx, bytes_rx) = try_join(client_to_server, server_to_client).await?;
+
+            debug!("client wrote {:?} bytes and received {:?} bytes",
+                                         bytes_tx, bytes_rx);
+
+            // update stats connections and bytes
+            let mssg = StatsMssg{
+                            frontend: Some(lb.name.clone()),
+                            backend: lb.backend.name.clone(),
+                            connections: -1,
+                            bytes_tx: bytes_tx,
+                            bytes_rx: bytes_rx,
+                            servers: None};
+
+            match sender.send(mssg) {
+                Ok(_) => {},
+                Err(e) => error!("Error sending stats message on channel: {}", e)
+            }
+        },
+        None => error!("Unable to process request"),
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -307,13 +271,13 @@ mod tests {
         });
 
         let conf = Config::new("testdata/proxy_test.toml").unwrap();
-        let lb = proxy::Server::new(conf);
+        let mut lb = proxy::Server::new(conf);
 
         //TODO: verify messages sent over channel to stats endpoint from proxy
         let (tx, _) = channel();
 
         let tx = tx.clone();
-        thread::spawn( ||{
+        thread::spawn( move ||{
             lb.run(tx);
         });
 

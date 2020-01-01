@@ -1,16 +1,14 @@
-extern crate futures;
-
 use std::net::SocketAddr;
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind};
-use futures::{Future, Async, Poll};
 use std::net::TcpStream;
 use std::sync::{Arc, RwLock};
 use crate::stats::StatsMssg;
-use std::sync::mpsc::{Sender};
+use std::sync::mpsc::Sender;
 use rand::distributions::WeightedIndex;
 use rand::prelude::*;
 use std::time;
+use std::time::Duration;
+use tokio::task;
 
 #[derive(Debug, Clone)]
 struct Wrr {
@@ -24,6 +22,7 @@ pub struct ServerPool {
     servers_map: HashMap<SocketAddr, Wrr>,
     weights: Vec<u16>,
     weighted_servers: Vec<SocketAddr>,
+    dist: Option<WeightedIndex<u16>>,
 }
 
 #[derive(Debug)]
@@ -31,11 +30,6 @@ pub struct Backend {
     pub name: String,
     pub servers: Arc<RwLock<ServerPool>>,
     pub health_check_interval: u64,
-}
-
-pub struct NextBackend {
-    weighted_servers: Vec<SocketAddr>,
-    weights: Vec<u16>,
 }
 
 impl ServerPool {
@@ -67,22 +61,29 @@ impl ServerPool {
         }
         debug!("Created weighted backend server pool: {:?}", backend_servers);
 
-        let servers = ServerPool {
+        let mut servers_dist = None;
+        match WeightedIndex::new(weights.clone()) {
+            Ok(dist) => servers_dist = Some(dist),
+            Err(e) => {
+                error!("Unable to set weighted distribution for server pools: {:?}", e);
+                servers_dist = None;
+            }
+        }
+
+        ServerPool {
             servers_map: backend_servers,
             weights: weights,
-            weighted_servers: weighted_backend_servers
-        };
-        servers
+            weighted_servers: weighted_backend_servers,
+            dist: servers_dist,
+        }
     }
 }
 
 impl Backend {
     pub fn new(name: String, servers: HashMap<SocketAddr, Option<u16>>, health_check_interval: u64) -> Backend {
-        let backend_servers = ServerPool::new_servers(servers);
-
         Backend {
             name: name,
-            servers: Arc::new(RwLock::new(backend_servers)),
+            servers: Arc::new(RwLock::new(ServerPool::new_servers(servers))),
             health_check_interval: health_check_interval,
         }
     }
@@ -91,9 +92,11 @@ impl Backend {
         let mut srvs = self.servers.write().unwrap();
         let mut wgts = srvs.weights.clone();
 
+        let mut reset_dist = false;
         for (srv, healthy) in updates {
             if let Some(s) = srvs.servers_map.get_mut(&srv) {
                 s.healthy = *healthy;
+                reset_dist = true;
                 if *healthy {
                     wgts[s.weights_index] = s.weight;
                 } else {
@@ -102,31 +105,37 @@ impl Backend {
             }
         }
         srvs.weights = wgts;
-    }
-}
-
-// custom future for backend server selection during load balancing
-impl Future for NextBackend {
-    type Item = SocketAddr;
-    type Error = Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        if let Ok(dist) = WeightedIndex::new(&self.weights) {
-            let mut rng = thread_rng();
-            if let Some(target) = self.weighted_servers.get(dist.sample(&mut rng)) {
-                return Ok(Async::Ready(*target));
+        if reset_dist {
+            match WeightedIndex::new(srvs.weights.clone()) {
+                Ok(dist) => srvs.dist = Some(dist),
+                Err(e) => {
+                    error!("Unable to reset weighted distribution: {:?}", e);
+                    srvs.dist = None;
+                }
             }
         }
-        return Result::Err(Error::new(ErrorKind::Other, "No backend servers available"));
     }
 }
 
-pub fn get_next(backend: Arc<Backend>) -> NextBackend {
-    let srvs = backend.servers.read().unwrap();
-
-    NextBackend {
-        weighted_servers: srvs.weighted_servers.clone(),
-        weights: srvs.weights.clone(),
+pub fn get_next(backend: Arc<Backend>) -> Option<SocketAddr> {
+    match backend.servers.read() {
+        Ok(srvs) => {
+            if let Some(dist) = &srvs.dist {
+                if let Some(addr) = srvs.weighted_servers.get(dist.sample(&mut thread_rng())) {
+                    Some(*addr)
+                } else{
+                    error!("Backend {} unhealthy; Unable to schedule", backend.name);
+                    None
+                }
+            } else {
+                error!("Backend {} unhealthy; Unable to schedule", backend.name);
+                None
+            }
+        }
+        Err(e) => {
+            error!("Unable to schedule backend: {:?}", e);
+            None
+        }
     }
 }
 
@@ -138,7 +147,23 @@ fn tcp_health_check(server: SocketAddr) -> bool {
     }
 }
 
-pub fn health_checker(backend: Arc<Backend>, sender: &Sender<StatsMssg>) {
+pub async fn run_health_checker(back: Arc<Backend>, sender: Sender<StatsMssg>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut interval = tokio::time::interval(Duration::from_secs(back.health_check_interval));
+
+    loop {
+        let health_sender = sender.clone();
+        let health_back = back.clone();
+        debug!("Running backend health checker{:?}, {:?}", health_back, interval);
+
+        task::spawn_blocking(|| {
+            health_checker(health_back, health_sender)
+        }).await?;
+
+        interval.tick().await;
+    }
+}
+
+fn health_checker(backend: Arc<Backend>, sender: Sender<StatsMssg>) {
     let mut backend_status = HashMap::new();
     let mut update = false;
     // limit scope of read lock
@@ -162,7 +187,7 @@ pub fn health_checker(backend: Arc<Backend>, sender: &Sender<StatsMssg>) {
     send_status(backend.name.clone(), backend_status, sender);
 }
 
-fn send_status(name: String, updates: HashMap<SocketAddr, bool>, sender: &Sender<StatsMssg>) {
+fn send_status(name: String, updates: HashMap<SocketAddr, bool>, sender: Sender<StatsMssg>) {
     let mut servers = HashMap::new();
     for (srv, healthy) in updates {
         servers.insert(srv.to_string(), healthy);
@@ -183,7 +208,6 @@ fn send_status(name: String, updates: HashMap<SocketAddr, bool>, sender: &Sender
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::channel;
     use std::str::FromStr;
     use std::net::TcpListener;
     use std::{thread, time};
@@ -267,26 +291,24 @@ mod tests {
         test_servers.insert(FromStr::from_str("127.0.0.1:8082").unwrap(), Some(20));
         let test_bck = Arc::new(Backend::new("test".to_string(), test_servers, 1000));
 
-        let ftr = get_next(test_bck);
-        let test_weight: u16 = 20;
-        assert!(ftr.weights.contains(&test_weight) && ftr.weights.len() == 1);
-        assert_eq!(ftr.weighted_servers[0], FromStr::from_str("127.0.0.1:8082").unwrap());
+        let svr = get_next(test_bck);
+        assert_eq!(svr, Some(FromStr::from_str("127.0.0.1:8082").unwrap()));
     }
 
     #[test]
-    fn test_health_checker() {
+    fn test_srv_pool_health_checker() {
         let mut test_servers = HashMap::new();
         let test_addr = FromStr::from_str("127.0.0.1:8089").unwrap();
         test_servers.insert(test_addr, None);
 
-        // nothing listening on 127.0.0.1:8080 yet so should be marked as unhealthy
-        let test_bck = Arc::new(Backend::new("dummy".to_string(), test_servers, 1000));
+        // not listening on 127.0.0.1:8089 yet so should be marked as unhealthy
+        let test_bck = Backend::new("dummy".to_string(), test_servers.clone(), 1000);
         {
             let test_srv_pool = test_bck.servers.read().unwrap();
             assert_eq!(test_srv_pool.servers_map.get(&test_addr).unwrap().healthy, false);
         }
 
-        // start listening on 127.0.0.1:8089 so next health checks will mark as healthy
+        // start listening on 127.0.0.1:8089 so health checks will mark as healthy
         thread::spawn( ||{
             let listener = TcpListener::bind("127.0.0.1:8089").unwrap();
             match listener.accept() {
@@ -297,19 +319,10 @@ mod tests {
         let one_sec = time::Duration::from_secs(1);
         thread::sleep(one_sec);
 
-        let (tx, rx) = channel();
-
-        // run health chcker
-        health_checker(test_bck.clone(), &tx);
-
-        // verify repsonse message
-        let resp = rx.recv().unwrap();
-        assert_eq!(resp.backend, "dummy".to_string());
-        match resp.servers {
-            Some(srvs) => {
-                assert!(srvs.get("127.0.0.1:8089").unwrap());
-            }
-            None => assert!(false),
+        let test_bck = Backend::new("dummy".to_string(), test_servers, 1000);
+        {
+            let test_srv_pool = test_bck.servers.read().unwrap();
+            assert_eq!(test_srv_pool.servers_map.get(&test_addr).unwrap().healthy, true);
         }
     }
 }

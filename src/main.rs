@@ -63,8 +63,10 @@ fn main() {
                 loadbalancer.run(stats_sender);
             } else {
                 debug!("Starting loadbalancer in proxy mode");
-                let loadbalancer = proxy::Server::new(config);
-                loadbalancer.run(stats_sender);
+                let mut loadbalancer = proxy::Server::new(config);
+                if let Err(_) = loadbalancer.run(stats_sender) {
+                    error!("Unable to start server");
+                }
             }
         },
         Err(e) => error!("Error loading configuration file: {:?}", e)
