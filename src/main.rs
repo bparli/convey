@@ -6,15 +6,15 @@ extern crate toml;
 extern crate serde_derive;
 
 mod config;
-mod stats;
-mod proxy;
 mod passthrough;
+mod proxy;
+mod stats;
 
-use docopt::Docopt;
 use self::config::Config;
+use docopt::Docopt;
 
 const USAGE: &'static str = "
-Convey 0.2.2
+Convey 0.3.1
 
 Usage:
   convey
@@ -36,10 +36,10 @@ Options:
 
 fn main() {
     env_logger::init();
-    let version = "0.1.0".to_owned();
+    let version = "0.3.1".to_owned();
     let args = Docopt::new(USAGE)
-                      .and_then(|dopt| dopt.version(Some(version)).parse())
-                      .unwrap_or_else(|e| e.exit());
+        .and_then(|dopt| dopt.version(Some(version)).parse())
+        .unwrap_or_else(|e| e.exit());
     println!("{:?}", args);
 
     let mut config_file = "config.toml";
@@ -68,7 +68,7 @@ fn main() {
                     error!("Unable to start server");
                 }
             }
-        },
-        Err(e) => error!("Error loading configuration file: {:?}", e)
+        }
+        Err(e) => error!("Error loading configuration file: {:?}", e),
     }
 }
