@@ -1,19 +1,19 @@
 extern crate tokio;
 
-use std::sync::Arc;
+use futures::future::try_join;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use futures::future::try_join;
-use tokio::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use tokio::io;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
-use std::sync::mpsc::{Sender, Receiver};
-use std::collections::HashMap;
 
 mod backend;
 
-use self::backend::{Backend, ServerPool, run_health_checker, get_next};
-use crate::config::{Config, BaseConfig};
+use self::backend::{get_next, run_health_checker, Backend, ServerPool};
+use crate::config::{BaseConfig, Config};
 use crate::stats::StatsMssg;
 
 #[derive(Debug)]
@@ -35,16 +35,19 @@ pub struct Proxy {
 impl Server {
     pub fn new(config: Config) -> Server {
         let rcvr = config.clone().subscribe();
-        let mut new_server = Server{proxies: Vec::new(), rx: rcvr };
-        for (name,front) in config.base.frontends.iter() {
+        let mut new_server = Server {
+            proxies: Vec::new(),
+            rx: rcvr,
+        };
+        for (name, front) in config.base.frontends.iter() {
             let mut backend_servers = HashMap::new();
             let mut health_check_interval = 5;
             match config.base.backends.get(&front.backend) {
                 Some(back) => {
-                    for (_,addr) in &back.servers {
+                    for (_, addr) in &back.servers {
                         let listen_addr: SocketAddr = FromStr::from_str(&addr.addr)
-                                          .ok()
-                                          .expect("Failed to parse listen host:port string");
+                            .ok()
+                            .expect("Failed to parse listen host:port string");
                         backend_servers.insert(listen_addr, addr.weight);
                     }
                     if back.health_check_interval > 0 {
@@ -53,15 +56,19 @@ impl Server {
                 }
                 None => {
                     error!("Error finding backend server pool in config: {} not found on backend config", front.backend);
-                    continue
-                },
+                    continue;
+                }
             };
             if backend_servers.len() > 0 {
                 let listen_addr: SocketAddr = FromStr::from_str(&front.listen_addr)
-                                  .ok()
-                                  .expect("Failed to parse listen host:port string");
+                    .ok()
+                    .expect("Failed to parse listen host:port string");
 
-                let backend = Backend::new(front.backend.clone(), backend_servers, health_check_interval);
+                let backend = Backend::new(
+                    front.backend.clone(),
+                    backend_servers,
+                    health_check_interval,
+                );
                 let new_lb = Proxy {
                     name: name.clone(),
                     listen_addr: listen_addr,
@@ -76,7 +83,7 @@ impl Server {
     }
 
     // wait on config changes to update backend server pool
-    fn config_sync(&mut self) {
+    async fn config_sync(&mut self) {
         loop {
             match self.rx.recv() {
                 Ok(new_config) => {
@@ -85,15 +92,18 @@ impl Server {
                         let mut backend_servers = HashMap::new();
                         for (_, server) in backend.servers {
                             let listen_addr: SocketAddr = FromStr::from_str(&server.addr)
-                                              .ok()
-                                              .expect("Failed to parse listen host:port string");
+                                .ok()
+                                .expect("Failed to parse listen host:port string");
                             backend_servers.insert(listen_addr, server.weight);
                         }
                         let new_server_pool = ServerPool::new_servers(backend_servers);
                         for proxy in self.proxies.iter() {
                             if proxy.backend.name == backend_name {
-                                info!("Updating backend {} with {:?}", backend_name, new_server_pool);
-                                *proxy.backend.servers.write().unwrap() = new_server_pool.clone();
+                                info!(
+                                    "Updating backend {} with {:?}",
+                                    backend_name, new_server_pool
+                                );
+                                *proxy.backend.servers.write().await = new_server_pool.clone();
                             }
                         }
                     }
@@ -104,7 +114,10 @@ impl Server {
     }
 
     #[tokio::main]
-    pub async fn run(&mut self, sender: Sender<StatsMssg>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(
+        &mut self,
+        sender: Sender<StatsMssg>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let proxies = self.proxies.clone();
 
         for proxy in proxies.iter() {
@@ -127,12 +140,15 @@ impl Server {
                 }
             });
         }
-        self.config_sync();
+        self.config_sync().await;
         Ok(())
     }
 }
 
-async fn run_server(lb: Arc<Proxy>, sender: Sender<StatsMssg>) -> Result<(), Box<dyn std::error::Error>>{
+async fn run_server(
+    lb: Arc<Proxy>,
+    sender: Sender<StatsMssg>,
+) -> Result<(), Box<dyn std::error::Error>> {
     debug!("Listening on: {:?}", lb.listen_addr);
     debug!("Proxying to: {:?}", lb.backend);
 
@@ -147,19 +163,21 @@ async fn run_server(lb: Arc<Proxy>, sender: Sender<StatsMssg>) -> Result<(), Box
         let err_lb = lb.clone();
         let err_sdr = sender.clone();
 
-        tokio::spawn( async move {
+        tokio::spawn(async move {
             if let Err(e) = process(inbound, sdr, thread_lb).await {
                 error!("Failed to process tcp request; error={}", e);
                 // update stats connections
-                let mssg = StatsMssg{frontend: Some(err_lb.name.clone()),
-                                    backend: err_lb.backend.name.clone(),
-                                    connections: -1,
-                                    bytes_tx: 0,
-                                    bytes_rx: 0,
-                                    servers: None};
+                let mssg = StatsMssg {
+                    frontend: Some(err_lb.name.clone()),
+                    backend: err_lb.backend.name.clone(),
+                    connections: -1,
+                    bytes_tx: 0,
+                    bytes_rx: 0,
+                    servers: None,
+                };
                 match err_sdr.send(mssg) {
-                    Ok(_) => {},
-                    Err(e) => error!("Error sending stats message on channel: {}", e)
+                    Ok(_) => {}
+                    Err(e) => error!("Error sending stats message on channel: {}", e),
                 }
             }
         });
@@ -167,22 +185,27 @@ async fn run_server(lb: Arc<Proxy>, sender: Sender<StatsMssg>) -> Result<(), Box
     Ok(())
 }
 
-async fn process(mut inbound: TcpStream, sender: Sender<StatsMssg>,
-    lb: Arc<Proxy>) -> Result<(), Box<dyn std::error::Error>> {
-
+async fn process(
+    mut inbound: TcpStream,
+    sender: Sender<StatsMssg>,
+    lb: Arc<Proxy>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // update stats connections
-    let mssg = StatsMssg{frontend: Some(lb.name.clone()),
-                        backend: lb.backend.name.clone(),
-                        connections: 1,
-                        bytes_tx: 0,
-                        bytes_rx: 0,
-                        servers: None};
+    let mssg = StatsMssg {
+        frontend: Some(lb.name.clone()),
+        backend: lb.backend.name.clone(),
+        connections: 1,
+        bytes_tx: 0,
+        bytes_rx: 0,
+        servers: None,
+    };
     match sender.send(mssg) {
-        Ok(_) => {},
-        Err(e) => error!("Error sending stats message on channel: {}", e)
+        Ok(_) => {}
+        Err(e) => error!("Error sending stats message on channel: {}", e),
     }
 
-    match get_next(lb.backend.clone()) {
+    let join = get_next(lb.backend.clone());
+    match join.await {
         Some(server_addr) => {
             let mut server = TcpStream::connect(&server_addr).await?;
 
@@ -194,23 +217,26 @@ async fn process(mut inbound: TcpStream, sender: Sender<StatsMssg>,
 
             let (bytes_tx, bytes_rx) = try_join(client_to_server, server_to_client).await?;
 
-            debug!("client wrote {:?} bytes and received {:?} bytes",
-                                         bytes_tx, bytes_rx);
+            debug!(
+                "client wrote {:?} bytes and received {:?} bytes",
+                bytes_tx, bytes_rx
+            );
 
             // update stats connections and bytes
-            let mssg = StatsMssg{
-                            frontend: Some(lb.name.clone()),
-                            backend: lb.backend.name.clone(),
-                            connections: -1,
-                            bytes_tx: bytes_tx,
-                            bytes_rx: bytes_rx,
-                            servers: None};
+            let mssg = StatsMssg {
+                frontend: Some(lb.name.clone()),
+                backend: lb.backend.name.clone(),
+                connections: -1,
+                bytes_tx: bytes_tx,
+                bytes_rx: bytes_rx,
+                servers: None,
+            };
 
             match sender.send(mssg) {
-                Ok(_) => {},
-                Err(e) => error!("Error sending stats message on channel: {}", e)
+                Ok(_) => {}
+                Err(e) => error!("Error sending stats message on channel: {}", e),
             }
-        },
+        }
         None => error!("Unable to process request"),
     }
     Ok(())
@@ -219,22 +245,22 @@ async fn process(mut inbound: TcpStream, sender: Sender<StatsMssg>,
 #[cfg(test)]
 mod tests {
     extern crate hyper;
-    use std::sync::mpsc::channel;
-    use std::thread;
-    use crate::config::{Config};
+    use crate::config::Config;
     use crate::proxy;
-    use hyper::{Body, Request, Response, Server};
-    use hyper::service::service_fn_ok;
     use hyper::rt::{self, Future};
+    use hyper::service::service_fn_ok;
+    use hyper::{Body, Request, Response, Server};
     use std::fs::File;
     use std::io::{Read, Write};
-    use std::{time};
+    use std::sync::mpsc::channel;
+    use std::thread;
+    use std::time;
 
     fn update_config(filename: &str, word_from: String, word_to: String) {
         let mut src = File::open(&filename).unwrap();
         let mut data = String::new();
         src.read_to_string(&mut data).unwrap();
-        drop(src);  // Close the file early
+        drop(src); // Close the file early
 
         // Run the replace operation in memory
         let new_data = data.replace(&*word_from, &*word_to);
@@ -246,27 +272,27 @@ mod tests {
 
     #[test]
     fn test_proxy() {
-        thread::spawn( ||{
+        thread::spawn(|| {
             let addr = ([127, 0, 0, 1], 8080).into();
             let server = Server::bind(&addr)
-            .serve(|| {
-                service_fn_ok(move |_: Request<Body>| {
-                    Response::new(Body::from("Success DummyA Server"))
+                .serve(|| {
+                    service_fn_ok(move |_: Request<Body>| {
+                        Response::new(Body::from("Success DummyA Server"))
+                    })
                 })
-            })
-            .map_err(|e| eprintln!("server error: {}", e));
+                .map_err(|e| eprintln!("server error: {}", e));
             rt::run(server);
         });
 
-        thread::spawn( ||{
+        thread::spawn(|| {
             let addr = ([127, 0, 0, 1], 8081).into();
             let server = Server::bind(&addr)
-            .serve(|| {
-                service_fn_ok(move |_: Request<Body>| {
-                    Response::new(Body::from("Success DummyB Server"))
+                .serve(|| {
+                    service_fn_ok(move |_: Request<Body>| {
+                        Response::new(Body::from("Success DummyB Server"))
+                    })
                 })
-            })
-            .map_err(|e| eprintln!("server error: {}", e));
+                .map_err(|e| eprintln!("server error: {}", e));
             rt::run(server);
         });
 
@@ -277,7 +303,7 @@ mod tests {
         let (tx, _) = channel();
 
         let tx = tx.clone();
-        thread::spawn( move ||{
+        thread::spawn(move || {
             lb.run(tx);
         });
 
@@ -292,7 +318,11 @@ mod tests {
         }
 
         // update config to take DummyA out of service
-        update_config("testdata/proxy_test.toml", "weight = 10000".to_string(), "weight = 0".to_string());
+        update_config(
+            "testdata/proxy_test.toml",
+            "weight = 10000".to_string(),
+            "weight = 0".to_string(),
+        );
         thread::sleep(two_secs);
 
         // validate only DummyB is serving requests now that DummyA has been taken out of service (weight set to 0)
@@ -303,6 +333,10 @@ mod tests {
         }
 
         // reset fixture
-        update_config("testdata/proxy_test.toml", "weight = 0".to_string(), "weight = 10000".to_string());
+        update_config(
+            "testdata/proxy_test.toml",
+            "weight = 0".to_string(),
+            "weight = 10000".to_string(),
+        );
     }
 }

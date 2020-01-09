@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "convey"
-version = "0.2.2"
+version = "0.3.1"
 dependencies = [
  "crossbeam-channel 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "docopt 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -149,7 +149,7 @@ dependencies = [
  "serde_derive 1.0.81 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_json 1.0.33 (registry+https://github.com/rust-lang/crates.io-index)",
  "socket2 0.3.8 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "toml 0.4.10 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "0.2.6"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "bytes 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1802,7 +1802,7 @@ dependencies = [
  "pin-project-lite 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "signal-hook-registry 1.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "slab 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio-macros 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio-macros 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "winapi 0.3.8 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "tokio-macros"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "quote 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2394,14 +2394,14 @@ dependencies = [
 "checksum thread_local 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)" = "c6b53e329000edc2b34dbe8545fd20e55a333362d0a321909685a19bd28c3f1b"
 "checksum time 0.1.41 (registry+https://github.com/rust-lang/crates.io-index)" = "847da467bf0db05882a9e2375934a8a55cffdc9db0d128af1518200260ba1f6c"
 "checksum tokio 0.1.13 (registry+https://github.com/rust-lang/crates.io-index)" = "a7817d4c98cc5be21360b3b37d6036fe9b7aefa5b7a201b7b16ff33423822f7d"
-"checksum tokio 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)" = "0e1bef565a52394086ecac0a6fa3b8ace4cb3a138ee1d96bd2b93283b56824e3"
+"checksum tokio 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)" = "a9d5acfe1b1130d50ac2286a2f1f8cf49309680366ceb7609ce369b75c9058d4"
 "checksum tokio-codec 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)" = "5c501eceaf96f0e1793cf26beb63da3d11c738c4a943fdf3746d81d64684c39f"
 "checksum tokio-core 0.1.17 (registry+https://github.com/rust-lang/crates.io-index)" = "aeeffbbb94209023feaef3c196a41cbcdafa06b4a6f893f68779bb5e53796f71"
 "checksum tokio-current-thread 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)" = "331c8acc267855ec06eb0c94618dcbbfea45bed2d20b77252940095273fb58f6"
 "checksum tokio-executor 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)" = "c117b6cf86bb730aab4834f10df96e4dd586eff2c3c27d3781348da49e255bde"
 "checksum tokio-fs 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)" = "60ae25f6b17d25116d2cba342083abe5255d3c2c79cb21ea11aa049c53bf7c75"
 "checksum tokio-io 0.1.10 (registry+https://github.com/rust-lang/crates.io-index)" = "7392fe0a70d5ce0c882c4778116c519bd5dbaa8a7c3ae3d04578b3afafdcda21"
-"checksum tokio-macros 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "7de6c21a09bab0ce34614bb1071403ad9996db62715eb61e63be5d82f91342bc"
+"checksum tokio-macros 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)" = "50a61f268a3db2acee8dcab514efc813dc6dbe8a00e86076f935f94304b59a7a"
 "checksum tokio-reactor 0.1.7 (registry+https://github.com/rust-lang/crates.io-index)" = "502b625acb4ee13cbb3b90b8ca80e0addd263ddacf6931666ef751e610b07fb5"
 "checksum tokio-tcp 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)" = "7ad235e9dadd126b2d47f6736f65aa1fdcd6420e66ca63f44177bc78df89f912"
 "checksum tokio-threadpool 0.1.9 (registry+https://github.com/rust-lang/crates.io-index)" = "56c5556262383032878afad66943926a1d1f0967f17e94bd7764ceceb3b70e7f"
