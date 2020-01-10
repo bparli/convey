@@ -1,6 +1,6 @@
 [package]
 name = "convey"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["Ben Parli <bparli@gmail.com>"]
 edition = "2018"
 
@@ -27,6 +27,6 @@ hash_ring = { git = "https://github.com/bparli/rust-hash-ring", branch = "derive
 pnet = "0.23.0"
 pnet_macros_support = "0.23.0"
 lru_time_cache = "0.8"
-crossbeam-channel = "0.3"
 socket2 = "0.3.8"
 ipnetwork = "0.15"
+may = "0.3.14"

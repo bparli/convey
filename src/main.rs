@@ -4,6 +4,8 @@ extern crate env_logger;
 extern crate toml;
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
+extern crate may;
 
 mod config;
 mod passthrough;
@@ -14,7 +16,7 @@ use self::config::Config;
 use docopt::Docopt;
 
 const USAGE: &'static str = "
-Convey 0.3.1
+Convey 0.3.2
 
 Usage:
   convey
@@ -36,7 +38,7 @@ Options:
 
 fn main() {
     env_logger::init();
-    let version = "0.3.1".to_owned();
+    let version = "0.3.2".to_owned();
     let args = Docopt::new(USAGE)
         .and_then(|dopt| dopt.version(Some(version)).parse())
         .unwrap_or_else(|e| e.exit());

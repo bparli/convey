@@ -255,6 +255,7 @@ mod tests {
     use std::sync::mpsc::channel;
     use std::thread;
     use std::time;
+    use tokio::prelude::*;
 
     fn update_config(filename: &str, word_from: String, word_to: String) {
         let mut src = File::open(&filename).unwrap();
@@ -304,14 +305,14 @@ mod tests {
 
         let tx = tx.clone();
         thread::spawn(move || {
-            lb.run(tx);
+            lb.run(tx).unwrap();
         });
 
-        let two_secs = time::Duration::from_secs(2);
-        thread::sleep(two_secs);
+        let secs = time::Duration::from_secs(2);
+        thread::sleep(secs);
 
         // validate weighted scheduling
-        for _ in 0..10 {
+        for _ in 0..5 {
             let mut resp = reqwest::get("http://127.0.0.1:3000").unwrap();
             assert_eq!(resp.status(), 200);
             assert!(resp.text().unwrap().contains("DummyA"));
@@ -323,10 +324,10 @@ mod tests {
             "weight = 10000".to_string(),
             "weight = 0".to_string(),
         );
-        thread::sleep(two_secs);
+        thread::sleep(secs);
 
         // validate only DummyB is serving requests now that DummyA has been taken out of service (weight set to 0)
-        for _ in 0..10 {
+        for _ in 0..5 {
             let mut resp = reqwest::get("http://127.0.0.1:3000").unwrap();
             assert_eq!(resp.status(), 200);
             assert!(resp.text().unwrap().contains("DummyB"));
