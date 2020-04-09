@@ -1,16 +1,16 @@
 extern crate futures;
 extern crate hash_ring;
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock, Mutex};
-use crate::stats::StatsMssg;
-use std::sync::mpsc::{Sender};
-use std::net::{TcpStream, IpAddr, Ipv4Addr, SocketAddr};
-use hash_ring::HashRing;
-use std::time;
-use socket2::SockAddr;
-use crate::passthrough;
 use self::passthrough::utils::allocate_socket;
+use crate::passthrough;
+use crate::stats::StatsMssg;
+use hash_ring::HashRing;
+use socket2::SockAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time;
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -43,7 +43,11 @@ impl ToString for Node {
 }
 
 impl Backend {
-    pub fn new(name: String, servers: HashMap<SocketAddr, Option<u16>>, health_check_interval: u64) -> Backend {
+    pub fn new(
+        name: String,
+        servers: HashMap<SocketAddr, Option<u16>>,
+        health_check_interval: u64,
+    ) -> Backend {
         let pool = ServerPool::new_servers(servers);
         Backend {
             name: name,
@@ -53,7 +57,13 @@ impl Backend {
         }
     }
 
-    pub fn get_server(&self, ip_dst: IpAddr, port_dst: u16, ip_src: IpAddr, port_src: u16) -> Option<Node> {
+    pub fn get_server(
+        &self,
+        ip_dst: IpAddr,
+        port_dst: u16,
+        ip_src: IpAddr,
+        port_src: u16,
+    ) -> Option<Node> {
         // Build "4-tuple" of destination ip, destination port, source ip, source port
         // in form of str to feed to hashring
         let mut tuple: String = ip_dst.to_string();
@@ -62,20 +72,26 @@ impl Backend {
         tuple.push_str(&port_src.to_string());
 
         let mut srvs_ring = self.ring.lock().unwrap();
-        debug!("Scheduling backend server for {} with ring {:?}", tuple, srvs_ring);
-        match srvs_ring.get_node(tuple.to_string().clone()){
+        debug!(
+            "Scheduling backend server for {} with ring {:?}",
+            tuple, srvs_ring
+        );
+        match srvs_ring.get_node(tuple.to_string().clone()) {
             Some(node) => {
                 debug!("Scheduled backend server {:?} for tuple {}", node, tuple);
                 Some(node.clone())
-            },
-            None => {
-                None
             }
+            None => None,
         }
     }
 
     pub fn get_server_health(&self, server: Node) -> bool {
-        match self.servers_map.read().unwrap().get(&SocketAddr::new(server.host, server.port)) {
+        match self
+            .servers_map
+            .read()
+            .unwrap()
+            .get(&SocketAddr::new(server.host, server.port))
+        {
             Some(healthy) => *healthy,
             None => false,
         }
@@ -89,9 +105,15 @@ impl Backend {
                 debug!("Set {} health status to {} from {}", srv, *healthy, *s);
                 *s = *healthy;
                 if *healthy {
-                    srvs_ring.add_node(&Node{host: srv.ip(), port: srv.port()})
+                    srvs_ring.add_node(&Node {
+                        host: srv.ip(),
+                        port: srv.port(),
+                    })
                 } else {
-                    srvs_ring.remove_node(&Node{host: srv.ip(), port: srv.port()})
+                    srvs_ring.remove_node(&Node {
+                        host: srv.ip(),
+                        port: srv.port(),
+                    })
                 }
             }
         }
@@ -109,17 +131,23 @@ impl ServerPool {
             if server.is_ipv4() {
                 if simple_tcp_health_check(*server) {
                     backend_servers.insert(*server, true);
-                    nodes.push(Node{host: server.ip(), port: server.port()})
+                    nodes.push(Node {
+                        host: server.ip(),
+                        port: server.port(),
+                    })
                 } else {
                     backend_servers.insert(*server, false);
                 }
             } else {
-                continue
+                continue;
             }
         }
 
-        debug!("New Server Pool with map {:?} and hashring nodes {:?}", backend_servers, nodes);
-        ServerPool{
+        debug!(
+            "New Server Pool with map {:?} and hashring nodes {:?}",
+            backend_servers, nodes
+        );
+        ServerPool {
             servers_map: backend_servers,
             ring: HashRing::new(nodes, 100),
         }
@@ -139,9 +167,9 @@ fn simple_tcp_health_check(server: SocketAddr) -> bool {
 fn tcp_health_check(server: SocketAddr, ip: Ipv4Addr) -> bool {
     if let Some(sock) = allocate_socket(ip) {
         if let Ok(_) = sock.connect_timeout(&SockAddr::from(server), time::Duration::from_secs(3)) {
-            return true
+            return true;
         } else {
-            return false
+            return false;
         }
     }
     error!("Unable to allocate port for health checking");
@@ -156,7 +184,10 @@ pub fn health_checker(backend: Arc<Backend>, sender: &Sender<StatsMssg>, local_i
         for (server, status) in backend.servers_map.read().unwrap().iter() {
             let res = tcp_health_check(*server, local_ip);
             if res != *status {
-                info!("Server {} status has changed from {} to {}.  Updating stats and backend", server, status, res);
+                info!(
+                    "Server {} status has changed from {} to {}.  Updating stats and backend",
+                    server, status, res
+                );
                 backend_updates.insert(server.clone(), res);
             }
             backend_status.insert(server.clone(), res);
@@ -176,34 +207,35 @@ fn send_status(name: String, updates: HashMap<SocketAddr, bool>, sender: &Sender
     for (srv, healthy) in updates {
         servers.insert(srv.to_string(), healthy);
     }
-    let mssg = StatsMssg{frontend: None,
-                        backend: name.clone(),
-                        connections: 0,
-                        bytes_tx: 0,
-                        bytes_rx: 0,
-                        servers: Some(servers)};
+    let mssg = StatsMssg {
+        frontend: None,
+        backend: name.clone(),
+        connections: 0,
+        bytes_tx: 0,
+        bytes_rx: 0,
+        servers: Some(servers),
+    };
     match sender.send(mssg) {
-        Ok(_) => {},
-        Err(e) => error!("Error sending stats message on channel: {}", e)
+        Ok(_) => {}
+        Err(e) => error!("Error sending stats message on channel: {}", e),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::channel;
-    use std::str::FromStr;
     use std::net::TcpListener;
+    use std::str::FromStr;
+    use std::sync::mpsc::channel;
     use std::{thread, time};
 
     #[test]
     fn test_new_servers_pt() {
-        thread::spawn( ||{
+        thread::spawn(|| {
             let listener = TcpListener::bind("127.0.0.1:9070").unwrap();
             match listener.accept() {
-                Ok((_socket, _addr)) => {},
-                Err(_e) => {},
+                Ok((_socket, _addr)) => {}
+                Err(_e) => {}
             }
         });
 
@@ -215,7 +247,10 @@ mod tests {
         test_servers.insert(FromStr::from_str("127.0.0.1:9071").unwrap(), Some(100));
 
         let mut test_pool = ServerPool::new_servers(test_servers);
-        let test_srv = test_pool.servers_map.get(&FromStr::from_str("127.0.0.1:9071").unwrap()).unwrap();
+        let test_srv = test_pool
+            .servers_map
+            .get(&FromStr::from_str("127.0.0.1:9071").unwrap())
+            .unwrap();
         assert_eq!(*test_srv, false);
 
         // test scheduling from hashring
@@ -227,11 +262,11 @@ mod tests {
     fn test_backend_get_server_pt() {
         // setup iptables for passthrough mode (iptables -t raw -A PREROUTING -p tcp --dport 3000 -j DROP)
 
-        thread::spawn( ||{
+        thread::spawn(|| {
             let listener = TcpListener::bind("127.0.0.1:9090").unwrap();
             match listener.accept() {
-                Ok((_socket, _addr)) => {},
-                Err(_e) => {},
+                Ok((_socket, _addr)) => {}
+                Err(_e) => {}
             }
         });
 
@@ -244,23 +279,74 @@ mod tests {
 
         let test_bck = Backend::new("test".to_string(), test_servers, 1000);
         assert_eq!(test_bck.health_check_interval, 1000);
-        assert_eq!(*test_bck.servers_map.read().unwrap().get(&SocketAddr::new("127.0.0.1".parse().unwrap(), 9090)).unwrap(), true);
-        assert_eq!(*test_bck.servers_map.read().unwrap().get(&SocketAddr::new("127.0.0.1".parse().unwrap(), 9091)).unwrap(), false);
-        assert_eq!(test_bck.get_server("127.0.0.1".parse().unwrap(), 32000, "127.0.0.1".parse().unwrap(), 33000).unwrap().port, 9090);
+        assert_eq!(
+            *test_bck
+                .servers_map
+                .read()
+                .unwrap()
+                .get(&SocketAddr::new("127.0.0.1".parse().unwrap(), 9090))
+                .unwrap(),
+            true
+        );
+        assert_eq!(
+            *test_bck
+                .servers_map
+                .read()
+                .unwrap()
+                .get(&SocketAddr::new("127.0.0.1".parse().unwrap(), 9091))
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            test_bck
+                .get_server(
+                    "127.0.0.1".parse().unwrap(),
+                    32000,
+                    "127.0.0.1".parse().unwrap(),
+                    33000
+                )
+                .unwrap()
+                .port,
+            9090
+        );
 
         let mut test_updates = HashMap::new();
         test_updates.insert(FromStr::from_str("127.0.0.1:9090").unwrap(), false);
         test_updates.insert(FromStr::from_str("127.0.0.1:9091").unwrap(), true);
         test_bck.update_backends_health(&test_updates);
 
-        assert_eq!(*test_bck.servers_map.read().unwrap().get(&SocketAddr::new("127.0.0.1".parse().unwrap(), 9091)).unwrap(), true);
-        assert_eq!(test_bck.get_server("127.0.0.1".parse().unwrap(), 32000, "127.0.0.1".parse().unwrap(), 33000).unwrap().port, 9091);
+        assert_eq!(
+            *test_bck
+                .servers_map
+                .read()
+                .unwrap()
+                .get(&SocketAddr::new("127.0.0.1".parse().unwrap(), 9091))
+                .unwrap(),
+            true
+        );
+        assert_eq!(
+            test_bck
+                .get_server(
+                    "127.0.0.1".parse().unwrap(),
+                    32000,
+                    "127.0.0.1".parse().unwrap(),
+                    33000
+                )
+                .unwrap()
+                .port,
+            9091
+        );
 
         let mut test_updates = HashMap::new();
         test_updates.insert(FromStr::from_str("127.0.0.1:9090").unwrap(), false);
         test_updates.insert(FromStr::from_str("127.0.0.1:9091").unwrap(), false);
         test_bck.update_backends_health(&test_updates);
-        match test_bck.get_server("127.0.0.1".parse().unwrap(), 32000, "127.0.0.1".parse().unwrap(), 33000) {
+        match test_bck.get_server(
+            "127.0.0.1".parse().unwrap(),
+            32000,
+            "127.0.0.1".parse().unwrap(),
+            33000,
+        ) {
             Some(_) => assert!(false),
             None => assert!(true),
         }
@@ -277,15 +363,23 @@ mod tests {
         // nothing listening on 127.0.0.1:8080 yet so should be marked as unhealthy
         let test_bck = Arc::new(Backend::new("dummy".to_string(), test_servers, 1000));
         {
-            assert_eq!(*test_bck.servers_map.read().unwrap().get(&test_addr).unwrap(), false);
+            assert_eq!(
+                *test_bck
+                    .servers_map
+                    .read()
+                    .unwrap()
+                    .get(&test_addr)
+                    .unwrap(),
+                false
+            );
         }
 
         // start listening on 127.0.0.1:8089 so next health checks will mark as healthy
-        thread::spawn( ||{
+        thread::spawn(|| {
             let listener = TcpListener::bind("127.0.0.1:9089").unwrap();
             match listener.accept() {
-                Ok((_socket, _addr)) => {},
-                Err(_e) => {},
+                Ok((_socket, _addr)) => {}
+                Err(_e) => {}
             }
         });
         let one_sec = time::Duration::from_secs(1);

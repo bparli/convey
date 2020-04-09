@@ -1,13 +1,13 @@
 extern crate pnet;
 
+use pnet::datalink::{linux, MacAddr, NetworkInterface};
+use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{tcp, Packet};
-use pnet::packet::ipv4::{MutableIpv4Packet};
+use socket2::{Domain, SockAddr, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
-use pnet::datalink::{linux, MacAddr, NetworkInterface};
-use socket2::{Socket, Domain, Type, SockAddr};
 
 // health ports are reserved for health checks
 pub const HEALTH_PORT_LOWER: u16 = 32768;
@@ -33,7 +33,12 @@ pub fn find_local_addr() -> Option<IpAddr> {
 }
 
 // only use in tests!
-pub fn build_dummy_ip(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_port: u16) -> MutableIpv4Packet<'static> {
+pub fn build_dummy_ip(
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+) -> MutableIpv4Packet<'static> {
     // Setup TCP header
     let mut vec: Vec<u8> = vec![0; TCP_HEADER_LEN];
     let mut tcp_header = MutableTcpPacket::new(&mut vec[..]).unwrap();
@@ -51,7 +56,7 @@ pub fn build_dummy_ip(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_por
     tcp_header.set_checksum(checksum);
 
     // Setup IP header
-    let ipbuf: Vec<u8> = vec!(0; TCP_HEADER_LEN + IPV4_HEADER_LEN);
+    let ipbuf: Vec<u8> = vec![0; TCP_HEADER_LEN + IPV4_HEADER_LEN];
     let mut ip_header = MutableIpv4Packet::owned(ipbuf).unwrap();
     ip_header.set_header_length(69);
     ip_header.set_total_length(52);
@@ -71,11 +76,16 @@ pub fn build_dummy_ip(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_por
 }
 
 // only use in tests!
-pub fn build_dummy_eth(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_port: u16) -> MutableEthernetPacket<'static> {
+pub fn build_dummy_eth(
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+) -> MutableEthernetPacket<'static> {
     let ip_header = build_dummy_ip(src_ip, dst_ip, src_port, dst_port);
 
     // Setup Ethernet header
-    let ethbuf: Vec<u8> = vec!(0; TCP_HEADER_LEN + IPV4_HEADER_LEN + ETHERNET_HEADER_LEN);
+    let ethbuf: Vec<u8> = vec![0; TCP_HEADER_LEN + IPV4_HEADER_LEN + ETHERNET_HEADER_LEN];
     let mut eth_header = MutableEthernetPacket::owned(ethbuf).unwrap();
 
     eth_header.set_destination(MacAddr::new(255, 255, 255, 255, 255, 255));
@@ -93,10 +103,13 @@ pub fn allocate_socket(listen_ip: Ipv4Addr) -> Option<Socket> {
     for i in HEALTH_PORT_LOWER..HEALTH_PORT_UPPER {
         match socket.bind(&SockAddr::from(SocketAddr::new(IpAddr::V4(listen_ip), i))) {
             Ok(_) => return Some(socket),
-            Err(_) => {},
+            Err(_) => {}
         }
     }
-    error!("Unable to allocate local port from range {} - {}", HEALTH_PORT_LOWER, HEALTH_PORT_UPPER);
+    error!(
+        "Unable to allocate local port from range {} - {}",
+        HEALTH_PORT_LOWER, HEALTH_PORT_UPPER
+    );
     None
 }
 
@@ -105,9 +118,9 @@ pub fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
     for interface in interfaces {
         for ip in interface.clone().ips {
             if ip.ip() == addr {
-                return Some(interface)
+                return Some(interface);
             }
         }
     }
-    return None
+    return None;
 }
