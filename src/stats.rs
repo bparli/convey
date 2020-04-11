@@ -1,14 +1,14 @@
+extern crate iron;
 extern crate router;
 extern crate serde_json;
-extern crate iron;
 
-use iron::{Handler, Iron, Request, Response, IronResult, status, mime};
+use crate::config::BaseConfig;
+use iron::{mime, status, Handler, Iron, IronResult, Request, Response};
 use router::Router;
+use std::collections::HashMap;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use crate::config::BaseConfig;
-use std::sync::mpsc::{channel, Sender, Receiver};
-use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct StatsMssg {
@@ -99,52 +99,52 @@ pub fn run(lb_config: &BaseConfig) -> Sender<StatsMssg> {
     let mut router = Router::new();
     router.get("/stats", handler, "handler");
     let stats_addr = format!("0.0.0.0:{}", lb_config.stats.port);
-    thread::spawn(move ||{
-        match Iron::new(router).http(&stats_addr) {
-            Ok(_) => info!("Started stats api on {}/stats", &stats_addr),
-            Err(e) => error!("Error started stats api {}", e),
-        }
+    thread::spawn(move || match Iron::new(router).http(&stats_addr) {
+        Ok(_) => info!("Started stats api on {}/stats", &stats_addr),
+        Err(e) => error!("Error started stats api {}", e),
     });
 
     let thread_stats = stats.clone();
-    thread::spawn(move ||{
-        loop {
-            match receiver.recv() {
-                Ok(mssg) => {
-                    let mut new_stats = thread_stats.write().unwrap();
-                    new_stats.current_connections = new_stats.current_connections + mssg.connections;
-                    if  mssg.connections > 0 {
-                        new_stats.total_connections = new_stats.total_connections + mssg.connections;
-                    }
-                    new_stats.total_bytes_rx = new_stats.total_bytes_rx + mssg.bytes_rx;
-                    new_stats.total_bytes_tx = new_stats.total_bytes_tx + mssg.bytes_tx;
+    thread::spawn(move || loop {
+        match receiver.recv() {
+            Ok(mssg) => {
+                let mut new_stats = thread_stats.write().unwrap();
+                new_stats.current_connections = new_stats.current_connections + mssg.connections;
+                if mssg.connections > 0 {
+                    new_stats.total_connections = new_stats.total_connections + mssg.connections;
+                }
+                new_stats.total_bytes_rx = new_stats.total_bytes_rx + mssg.bytes_rx;
+                new_stats.total_bytes_tx = new_stats.total_bytes_tx + mssg.bytes_tx;
 
-                    if let Some(mut backend_stats) = new_stats.backends.get_mut(&mssg.backend) {
-                        backend_stats.current_connections = backend_stats.current_connections + mssg.connections;
-                        if  mssg.connections > 0{
-                            backend_stats.total_connections = backend_stats.total_connections + mssg.connections;
-                        }
-                        backend_stats.bytes_rx = backend_stats.bytes_rx + mssg.bytes_rx;
-                        backend_stats.bytes_tx = backend_stats.bytes_tx + mssg.bytes_tx;
-
-                        if let Some(servers) = mssg.servers {
-                            backend_stats.servers = servers;
-                        }
+                if let Some(mut backend_stats) = new_stats.backends.get_mut(&mssg.backend) {
+                    backend_stats.current_connections =
+                        backend_stats.current_connections + mssg.connections;
+                    if mssg.connections > 0 {
+                        backend_stats.total_connections =
+                            backend_stats.total_connections + mssg.connections;
                     }
+                    backend_stats.bytes_rx = backend_stats.bytes_rx + mssg.bytes_rx;
+                    backend_stats.bytes_tx = backend_stats.bytes_tx + mssg.bytes_tx;
 
-                    if let Some(frontend_name) = &mssg.frontend {
-                        if let Some(mut frontend_stats) = new_stats.frontends.get_mut(frontend_name) {
-                            frontend_stats.current_connections = frontend_stats.current_connections + mssg.connections;
-                            if  mssg.connections > 0{
-                                frontend_stats.total_connections = frontend_stats.total_connections + mssg.connections;
-                            }
-                            frontend_stats.bytes_rx = frontend_stats.bytes_rx + mssg.bytes_rx;
-                            frontend_stats.bytes_tx = frontend_stats.bytes_tx + mssg.bytes_tx;
-                        }
+                    if let Some(servers) = mssg.servers {
+                        backend_stats.servers = servers;
                     }
-                },
-                Err(e) => error!("An error occurred while reading: {}", e),
+                }
+
+                if let Some(frontend_name) = &mssg.frontend {
+                    if let Some(mut frontend_stats) = new_stats.frontends.get_mut(frontend_name) {
+                        frontend_stats.current_connections =
+                            frontend_stats.current_connections + mssg.connections;
+                        if mssg.connections > 0 {
+                            frontend_stats.total_connections =
+                                frontend_stats.total_connections + mssg.connections;
+                        }
+                        frontend_stats.bytes_rx = frontend_stats.bytes_rx + mssg.bytes_rx;
+                        frontend_stats.bytes_tx = frontend_stats.bytes_tx + mssg.bytes_tx;
+                    }
+                }
             }
+            Err(e) => error!("An error occurred while reading: {}", e),
         }
     });
     sender
@@ -153,13 +153,13 @@ pub fn run(lb_config: &BaseConfig) -> Sender<StatsMssg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::stats;
-    use crate::config::{Config};
-    use restson::{RestClient, RestPath, Error};
+    use restson::{Error, RestClient, RestPath};
 
     impl RestPath<()> for Stats {
-    fn get_path(_: ()) -> Result<String, Error> {
-        Ok(String::from("stats"))
+        fn get_path(_: ()) -> Result<String, Error> {
+            Ok(String::from("stats"))
         }
     }
 
@@ -174,7 +174,7 @@ mod tests {
         let test_bck = data.backends.get("tcp3000_out").unwrap();
         assert_eq!(test_bck.current_connections, 0);
 
-        let test_mssg = StatsMssg{
+        let test_mssg = StatsMssg {
             frontend: None,
             backend: "tcp3000_out".to_string(),
             connections: 1,

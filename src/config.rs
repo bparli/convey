@@ -1,11 +1,11 @@
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Error as IOError};
+use std::io::{Error as IOError, Read};
 use std::result::Result;
-use std::sync::mpsc::{Receiver};
-use std::thread;
-use notify::{RecommendedWatcher, Watcher, RecursiveMode};
 use std::sync::mpsc::channel;
+use std::sync::mpsc::Receiver;
+use std::thread;
 use std::time::Duration;
 use toml;
 
@@ -31,18 +31,18 @@ pub struct Stats {
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct FrontendConfig {
     pub listen_addr: String,
-    pub backend:     String,
+    pub backend: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct BackendPool {
-    pub servers:    HashMap<String, ServerConfig>,
-    pub health_check_interval:   u64,
+    pub servers: HashMap<String, ServerConfig>,
+    pub health_check_interval: u64,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct ServerConfig {
-    pub addr:    String,
+    pub addr: String,
     pub weight: Option<u16>,
 }
 
@@ -63,7 +63,10 @@ pub enum ReadError {
 impl Config {
     pub fn new(filename: &str) -> Result<Config, ReadError> {
         let decoded = (load_config(filename))?;
-        Ok(Config{filename: filename.to_string(), base: decoded})
+        Ok(Config {
+            filename: filename.to_string(),
+            base: decoded,
+        })
     }
 
     fn reload(self) -> Result<BaseConfig, ReadError> {
@@ -74,34 +77,29 @@ impl Config {
         let filename = self.filename.clone();
         let (config_tx, config_rx) = channel();
         let config_tx = config_tx.clone();
-        thread::spawn( move || {
+        thread::spawn(move || {
             let (tx, rx) = channel();
-            let watcher: Result<RecommendedWatcher, notify::Error> = Watcher::new(tx, Duration::from_secs(2));
+            let watcher: Result<RecommendedWatcher, notify::Error> =
+                Watcher::new(tx, Duration::from_secs(2));
             match watcher {
-                Ok(mut w) => {
-                    match w.watch(filename, RecursiveMode::NonRecursive) {
-                        Ok(_) => {
-                            loop {
-                                match rx.recv() {
-                                    Ok(event) => {
-                                        debug!("config file watch event {:?}", event);
-                                        match self.clone().reload(){
-                                            Ok(new_config) => {
-                                                match config_tx.send(new_config) {
-                                                    Ok(_) => {},
-                                                    Err(e) => error!("Error sending re-loaded config {:?}", e),
-                                                }
-                                            }
-                                            Err(e) => error!("Unable to re-load new configuration {:?}", e),
-                                        }
-                                    }
-                                    Err(e) => error!("watch error: {:?}", e),
+                Ok(mut w) => match w.watch(filename, RecursiveMode::NonRecursive) {
+                    Ok(_) => loop {
+                        match rx.recv() {
+                            Ok(event) => {
+                                debug!("config file watch event {:?}", event);
+                                match self.clone().reload() {
+                                    Ok(new_config) => match config_tx.send(new_config) {
+                                        Ok(_) => {}
+                                        Err(e) => error!("Error sending re-loaded config {:?}", e),
+                                    },
+                                    Err(e) => error!("Unable to re-load new configuration {:?}", e),
                                 }
                             }
+                            Err(e) => error!("watch error: {:?}", e),
                         }
-                        Err(e) => error!("Error initializing config file watcher {}", e),
-                    }
-                }
+                    },
+                    Err(e) => error!("Error initializing config file watcher {}", e),
+                },
                 Err(e) => error!("Error initializing config file watcher {}", e),
             }
         });
@@ -109,7 +107,7 @@ impl Config {
     }
 }
 
-fn load_config(filename: &str) -> Result<BaseConfig, ReadError>{
+fn load_config(filename: &str) -> Result<BaseConfig, ReadError> {
     let mut contents = String::new();
     let mut file = (File::open(filename))?;
     (file.read_to_string(&mut contents))?;
@@ -149,12 +147,15 @@ mod tests {
             Ok(config) => {
                 assert!(config.filename == "testdata/test.toml".to_string());
                 let test_front = config.base.frontends.get("tcp_3000").unwrap();
-                assert!(test_front.listen_addr ==  "0.0.0.0:3000".to_string());
+                assert!(test_front.listen_addr == "0.0.0.0:3000".to_string());
             }
             Err(_) => assert!(false),
         }
 
-        assert!(Config::new("testdata/bad.toml").is_err(), "Config file is not valid");
+        assert!(
+            Config::new("testdata/bad.toml").is_err(),
+            "Config file is not valid"
+        );
     }
 
     #[test]
@@ -167,10 +168,10 @@ mod tests {
 
         {
             let mut f = OpenOptions::new()
-                    .write(true)
-                    .append(true)
-                    .open("testdata/test.toml")
-                    .unwrap();
+                .write(true)
+                .append(true)
+                .open("testdata/test.toml")
+                .unwrap();
             f.write_all(b"\n").unwrap();
             f.sync_data().unwrap();
         }
