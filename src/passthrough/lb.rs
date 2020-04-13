@@ -145,6 +145,7 @@ impl LB {
             match listen_addr.ip() {
                 IpAddr::V4(ip4) => {
                     // find local interface we should be listening on
+                    // only use this for interface properties like mac addr
                     let interface = match find_interface(ip4) {
                         Some(interface) => {
                             println!("Listening on interface {}", interface);

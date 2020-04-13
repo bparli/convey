@@ -104,7 +104,6 @@ impl Server {
 fn process_packets(
     lb: &mut LB,
     interface: NetworkInterface,
-    cfg: linux::Config,
     stats_sender: Sender<StatsMssg>,
     default_gw_mac: MacAddr,
     arp_cache: &mut Arp,
@@ -127,7 +126,7 @@ fn process_packets(
     });
 
     // Create a new channel, dealing with layer 2 packets
-    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, cfg) {
+    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, setup_interface_cfg()) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Unhandled channel type"),
         Err(e) => panic!(
@@ -162,14 +161,14 @@ fn process_packets(
                                                             listen_ip,
                                                             dst,
                                                             &mut iface_tx,
-                                                            interface.clone(),
+                                                            lb.iface.mac.unwrap(),
                                                         )
                                                     }
                                                     fwd_packet(
                                                         processed_packet.ip_header,
                                                         target_mac,
                                                         &mut iface_tx,
-                                                        interface.clone(),
+                                                        lb.iface.mac.unwrap(),
                                                     );
                                                     stats.connections +=
                                                         &processed_packet.pkt_stats.connections;
@@ -209,14 +208,14 @@ fn process_packets(
                                                                     listen_ip,
                                                                     dst,
                                                                     &mut iface_tx,
-                                                                    interface.clone(),
+                                                                    lb.iface.mac.unwrap(),
                                                                 )
                                                             }
                                                             fwd_packet(
                                                                 processed_packet.ip_header,
                                                                 target_mac,
                                                                 &mut iface_tx,
-                                                                interface.clone(),
+                                                                lb.iface.mac.unwrap(),
                                                             );
                                                             stats.connections += &processed_packet
                                                                 .pkt_stats
@@ -267,7 +266,8 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
     debug!("Listening for: {:?}, {:?}", lb.listen_ip, lb.listen_port);
     debug!("Load Balancing to: {:?}", lb.backend.name);
 
-    // find local interface we should be listening on
+    // find local interface we should be listening and sending on
+    // to setup this datalink channel we can't be on a loopback
     let interface = match find_interface(lb.listen_ip) {
         Some(interface) => {
             if interface.is_loopback() {
@@ -288,22 +288,8 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
 
     let mut arp_cache = Arp::new(interface.clone(), lb.listen_ip).unwrap();
 
-    let fanout = Some(FanoutOption {
-        group_id: rand::random::<u16>(),
-        fanout_type: FanoutType::HASH,
-        defrag: true,
-        rollover: false,
-    });
-    // set read/write timeouts to 0
-    let cfg = linux::Config {
-        read_timeout: Some(Duration::new(0, 0)),
-        write_timeout: Some(Duration::new(0, 0)),
-        fanout: fanout,
-        ..Default::default()
-    };
-
     // Create a new channel, dealing with layer 2 packets
-    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, cfg) {
+    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, setup_interface_cfg()) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Unhandled channel type"),
         Err(e) => panic!(
@@ -374,7 +360,6 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
             process_packets(
                 &mut thread_lb,
                 iface,
-                cfg,
                 thread_sender,
                 default_gw_mac,
                 &mut thread_arp_cache,
@@ -394,7 +379,7 @@ fn fwd_packet(
     ip_header: &mut MutableIpv4Packet,
     mac: MacAddr,
     iface_tx: &mut Box<dyn DataLinkSender>,
-    interface: NetworkInterface,
+    interface_mac: MacAddr,
 ) {
     iface_tx.build_and_send(
         1,
@@ -403,7 +388,7 @@ fn fwd_packet(
             let mut eth_packet = MutableEthernetPacket::new(eth_packet).unwrap();
 
             eth_packet.set_destination(mac);
-            eth_packet.set_source(interface.mac.unwrap());
+            eth_packet.set_source(interface_mac);
             eth_packet.set_ethertype(EtherTypes::Ipv4);
             eth_packet.set_payload(&ip_header.packet());
 
@@ -416,13 +401,13 @@ fn send_arp(
     listen_ip: Ipv4Addr,
     ip_dest: Ipv4Addr,
     iface_tx: &mut Box<dyn DataLinkSender>,
-    interface: NetworkInterface,
+    interface_mac: MacAddr,
 ) {
     iface_tx.build_and_send(1, 42, &mut |eth_packet| {
         let mut eth_packet = MutableEthernetPacket::new(eth_packet).unwrap();
 
         eth_packet.set_destination(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
-        eth_packet.set_source(interface.mac.unwrap());
+        eth_packet.set_source(interface_mac);
         eth_packet.set_ethertype(EtherTypes::Arp);
 
         let mut arp_buffer = [0u8; 28];
@@ -433,13 +418,29 @@ fn send_arp(
         arp_packet.set_hw_addr_len(6);
         arp_packet.set_proto_addr_len(4);
         arp_packet.set_operation(ArpOperations::Request);
-        arp_packet.set_sender_hw_addr(interface.mac.unwrap());
+        arp_packet.set_sender_hw_addr(interface_mac);
         arp_packet.set_sender_proto_addr(listen_ip);
         arp_packet.set_target_hw_addr(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
         arp_packet.set_target_proto_addr(ip_dest);
 
         eth_packet.set_payload(arp_packet.packet());
     });
+}
+
+fn setup_interface_cfg() -> linux::Config {
+    let fanout = Some(FanoutOption {
+        group_id: rand::random::<u16>(),
+        fanout_type: FanoutType::HASH,
+        defrag: true,
+        rollover: false,
+    });
+    // set read/write timeouts to 0
+    linux::Config {
+        read_timeout: Some(Duration::new(0, 0)),
+        write_timeout: Some(Duration::new(0, 0)),
+        fanout: fanout,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
