@@ -21,11 +21,9 @@ pub const TCP_HEADER_LEN: usize = 32;
 
 pub fn find_local_addr() -> Option<IpAddr> {
     for iface in pnet::datalink::interfaces() {
-        if !iface.is_loopback() {
-            for ipnet in iface.ips {
-                if ipnet.is_ipv4() {
-                    return Some(ipnet.ip());
-                }
+        for ipnet in iface.ips {
+            if ipnet.is_ipv4() {
+                return Some(ipnet.ip());
             }
         }
     }

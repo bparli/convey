@@ -7,7 +7,7 @@ use pnet::util::MacAddr;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use pnet::packet::ethernet::EthernetPacket;
+use pnet::packet::ethernet::MutableEthernetPacket;
 use pnet::packet::Packet;
 use std::sync::{Arc, RwLock};
 
@@ -53,7 +53,7 @@ impl Arp {
         None
     }
 
-    pub fn handle_arp(&mut self, ethernet: &EthernetPacket) {
+    pub fn handle_arp(&mut self, ethernet: &MutableEthernetPacket) {
         let header = ArpPacket::new(ethernet.payload());
         if let Some(header) = header {
             if header.get_operation() == ArpOperations::Reply {
@@ -148,7 +148,7 @@ mod tests {
 
                     eth_header.set_payload(arp_packet.packet());
 
-                    test_arp.handle_arp(&eth_header.to_immutable());
+                    test_arp.handle_arp(&eth_header);
 
                     assert_eq!(
                         test_arp.get_mac(ip4).unwrap(),
