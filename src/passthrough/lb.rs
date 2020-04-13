@@ -293,7 +293,7 @@ impl LB {
             debug!("Found existing connection {:?}", conn);
             match conn.backend_srv.host {
                 IpAddr::V4(fwd_ipv4) => {
-                    if self.backend.get_server_health(conn.backend_srv.clone()) {
+                    if self.backend.get_server_health(&conn.backend_srv) {
                         tcp_header.set_destination(conn.backend_srv.port);
 
                         // leave original tcp source if dsr
@@ -351,7 +351,7 @@ impl LB {
                     let mut ephem_port = 0 as u16;
                     if !self.dsr {
                         // set ephemeral port for tracking connections and in case of mutiple clients using same port
-                        ephem_port = self.clone().next_avail_port();
+                        ephem_port = self.next_avail_port();
                         debug!(
                             "Using Ephemeral port {} for client connection {:?}",
                             ephem_port,

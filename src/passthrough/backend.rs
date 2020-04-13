@@ -85,7 +85,7 @@ impl Backend {
         }
     }
 
-    pub fn get_server_health(&self, server: Node) -> bool {
+    pub fn get_server_health(&self, server: &Node) -> bool {
         match self
             .servers_map
             .read()

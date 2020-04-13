@@ -192,7 +192,7 @@ fn process_packets(
                                                         std::mem::drop(guard);
                                                         // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
                                                         if let Some(processed_packet) =
-                                                            lb.clone().server_response_handler(
+                                                            lb.server_response_handler(
                                                                 &mut ip_header,
                                                                 &mut tcp_header,
                                                                 cli_socket,
@@ -353,7 +353,6 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
     for _ in 0..lb.workers {
         let mut thread_lb = lb.clone();
         let iface = interface.clone();
-        //let thread_tx = outgoing_tx.clone();
         let thread_sender = sender.clone();
         let mut thread_arp_cache = arp_cache.clone();
         thread::spawn(move || {
