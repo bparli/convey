@@ -148,7 +148,6 @@ impl LB {
                     // only use this for interface properties like mac addr
                     let interface = match find_interface(ip4) {
                         Some(interface) => {
-                            println!("Listening on interface {}", interface);
                             interface
                         }
                         None => {

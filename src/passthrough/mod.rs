@@ -435,8 +435,6 @@ fn setup_interface_cfg() -> linux::Config {
     });
     // set read/write timeouts to 0
     linux::Config {
-        read_timeout: Some(Duration::new(0, 0)),
-        write_timeout: Some(Duration::new(0, 0)),
         fanout: fanout,
         ..Default::default()
     }
