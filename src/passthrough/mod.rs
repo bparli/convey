@@ -104,6 +104,7 @@ impl Server {
 fn process_packets(
     lb: &mut LB,
     interface: NetworkInterface,
+    interface_cfg: linux::Config,
     stats_sender: Sender<StatsMssg>,
     default_gw_mac: MacAddr,
     arp_cache: &mut Arp,
@@ -126,7 +127,7 @@ fn process_packets(
     });
 
     // Create a new channel, dealing with layer 2 packets
-    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, setup_interface_cfg()) {
+    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, interface_cfg) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Unhandled channel type"),
         Err(e) => panic!(
@@ -288,8 +289,9 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
 
     let mut arp_cache = Arp::new(interface.clone(), lb.listen_ip).unwrap();
 
+    let cfg = setup_interface_cfg();
     // Create a new channel, dealing with layer 2 packets
-    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, setup_interface_cfg()) {
+    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, cfg) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Unhandled channel type"),
         Err(e) => panic!(
@@ -359,6 +361,7 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
             process_packets(
                 &mut thread_lb,
                 iface,
+                cfg,
                 thread_sender,
                 default_gw_mac,
                 &mut thread_arp_cache,
