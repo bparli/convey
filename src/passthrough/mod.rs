@@ -433,7 +433,6 @@ fn setup_interface_cfg() -> linux::Config {
         defrag: true,
         rollover: false,
     });
-    // set read/write timeouts to 0
     linux::Config {
         fanout: fanout,
         ..Default::default()
