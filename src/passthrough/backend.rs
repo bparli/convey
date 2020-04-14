@@ -76,7 +76,7 @@ impl Backend {
             "Scheduling backend server for {} with ring {:?}",
             tuple, srvs_ring
         );
-        match srvs_ring.get_node(tuple.to_string().clone()) {
+        match srvs_ring.get_node(tuple.to_string()) {
             Some(node) => {
                 debug!("Scheduled backend server {:?} for tuple {}", node, tuple);
                 Some(node.clone())

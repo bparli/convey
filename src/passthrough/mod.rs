@@ -289,9 +289,9 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
 
     let mut arp_cache = Arp::new(interface.clone(), lb.listen_ip).unwrap();
 
-    let cfg = setup_interface_cfg();
+
     // Create a new channel, dealing with layer 2 packets
-    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, cfg) {
+    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, Default::default()) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Unhandled channel type"),
         Err(e) => panic!(
@@ -351,6 +351,7 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
         debug!("Sending another ARP request for Default Gateway's HW Addr");
     }
 
+    let cfg = setup_interface_cfg();
     // spawn the packet processing workers
     for _ in 0..lb.workers {
         let mut thread_lb = lb.clone();
