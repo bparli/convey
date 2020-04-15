@@ -14,6 +14,7 @@ use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::{checksum, MutableIpv4Packet};
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{tcp, Packet};
+use pnet::transport::TransportSender;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -205,7 +206,7 @@ impl LB {
         ip_header: &'a mut MutableIpv4Packet<'a>,
         tcp_header: &mut MutableTcpPacket,
         client_addr: &SocketAddr,
-        ipv4_tx: &TransportSender,
+        ipv4_tx: &mut TransportSender,
     ) -> Option<Processed<'a>> {
         match client_addr.ip() {
             IpAddr::V4(client_ipv4) => {
@@ -244,6 +245,14 @@ impl LB {
                     _ => {}
                 }
 
+                match ipv4_tx.send_to(
+                    ip_header.to_immutable(),
+                    IpAddr::V4(ip_header.get_destination()),
+                ) {
+                    Ok(_) => {}
+                    Err(e) => error!("{}", e),
+                }
+
                 return Some(Processed {
                     pkt_stats: mssg,
                     ip_header: ip_header,
@@ -259,6 +268,7 @@ impl LB {
         &mut self,
         ip_header: &'a mut MutableIpv4Packet<'a>,
         tcp_header: &mut MutableTcpPacket,
+        ipv4_tx: &mut TransportSender,
     ) -> Option<Processed<'a>> {
         let client_port = tcp_header.get_source();
 
@@ -315,6 +325,13 @@ impl LB {
                         ip_header.set_checksum(checksum(&ip_header.to_immutable()));
 
                         mssg.bytes_tx = tcp_header.payload().len() as u64;
+                        match ipv4_tx.send_to(
+                            ip_header.to_immutable(),
+                            IpAddr::V4(ip_header.get_destination()),
+                        ) {
+                            Ok(_) => {}
+                            Err(e) => error!("{}", e),
+                        }
                         return Some(Processed {
                             pkt_stats: mssg,
                             ip_header: ip_header,
@@ -372,6 +389,14 @@ impl LB {
                     ip_header.set_payload(&tcp_header.packet());
                     ip_header.set_destination(fwd_ipv4);
                     ip_header.set_checksum(checksum(&ip_header.to_immutable()));
+
+                    match ipv4_tx.send_to(
+                        ip_header.to_immutable(),
+                        IpAddr::V4(ip_header.get_destination()),
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => error!("{}", e),
+                    }
 
                     mssg.bytes_tx = tcp_header.payload().len() as u64;
 
@@ -431,6 +456,14 @@ impl LB {
             }
             mssg.connections = connections;
 
+            match ipv4_tx.send_to(
+                ip_header.to_immutable(),
+                IpAddr::V4(ip_header.get_destination()),
+            ) {
+                Ok(_) => {}
+                Err(e) => error!("{}", e),
+            }
+
             return Some(Processed {
                 pkt_stats: mssg,
                 ip_header: ip_header,
@@ -464,8 +497,11 @@ mod tests {
     use self::passthrough::utils::{build_dummy_ip, EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER};
     use crate::config::Config;
     use crate::passthrough;
+    use pnet::packet::ip::IpNextHeaderProtocols;
     use pnet::packet::tcp::{MutableTcpPacket, TcpPacket};
     use pnet::packet::Packet;
+    use pnet::transport::transport_channel;
+    use pnet::transport::TransportChannelType::Layer3;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
@@ -513,6 +549,8 @@ mod tests {
                 port: 3080,
             })
         }
+        let protocol = Layer3(IpNextHeaderProtocols::Tcp);
+        let (mut ipv4_tx, _) = transport_channel(4096, protocol).unwrap();
 
         // gen test ip/tcp packet with simulated client
         let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
@@ -520,7 +558,7 @@ mod tests {
 
         // call client_handler and verify packet being sent out to healthy backend server
         let processed_packet = test_lb
-            .client_handler(&mut req_header, &mut tcp_header)
+            .client_handler(&mut req_header, &mut tcp_header, &mut ipv4_tx)
             .unwrap();
         assert_eq!(processed_packet.ip_header.get_destination(), backend_srv_ip);
         assert_eq!(processed_packet.ip_header.get_source(), lb_ip);
@@ -555,12 +593,15 @@ mod tests {
         }
 
         {
+            let protocol = Layer3(IpNextHeaderProtocols::Tcp);
+            let (mut ipv4_tx, _) = transport_channel(4096, protocol).unwrap();
+
             // check same client again to verify connection tracker is used
             // but need new request header
             let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
             let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
             let processed_packet = test_lb
-                .client_handler(&mut req_header, &mut tcp_header)
+                .client_handler(&mut req_header, &mut tcp_header, &mut ipv4_tx)
                 .unwrap();
             // next port should not have incremented
 
@@ -590,11 +631,14 @@ mod tests {
             })
         }
 
+        let protocol = Layer3(IpNextHeaderProtocols::Tcp);
+        let (mut ipv4_tx, _) = transport_channel(4096, protocol).unwrap();
+
         // check same client again to verify connection is failed
         // but need new request header
         let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
         let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
-        test_lb.client_handler(&mut req_header, &mut tcp_header);
+        test_lb.client_handler(&mut req_header, &mut tcp_header, &mut ipv4_tx);
         // since there are not healthy backend servers there should be no connections added to map
         assert_eq!(test_lb.conn_tracker.read().unwrap().len(), 0);
     }
@@ -609,6 +653,9 @@ mod tests {
         let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
         let backend_srv_ip: Ipv4Addr = "8.8.8.8".parse().unwrap();
 
+        let protocol = Layer3(IpNextHeaderProtocols::Tcp);
+        let (mut ipv4_tx, _) = transport_channel(4096, protocol).unwrap();
+
         // simulate response from server at port 80 to local (ephemeral) port 35000
         let mut resp_header = build_dummy_ip(backend_srv_ip, lb_ip, 80, 35000);
         let mut tcp_header = MutableTcpPacket::owned(resp_header.payload().to_owned()).unwrap();
@@ -618,6 +665,7 @@ mod tests {
                 &mut resp_header,
                 &mut tcp_header,
                 &SocketAddr::new(IpAddr::V4(client_ip), 55000),
+                &mut ipv4_tx,
             )
             .unwrap();
         assert_eq!(srv_resp.ip_header.get_destination(), client_ip);

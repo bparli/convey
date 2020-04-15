@@ -2,30 +2,28 @@ extern crate lru_time_cache;
 extern crate pnet;
 extern crate pnet_macros_support;
 
-use self::arp::Arp;
 use self::backend::{health_checker, ServerPool};
 use self::lb::LB;
-use self::utils::{find_interface, ETHERNET_HEADER_LEN};
+use self::utils::find_interface;
 
 use crate::config::{BaseConfig, Config};
 use crate::stats::StatsMssg;
-use ipnetwork::{IpNetwork, Ipv4Network};
 use pnet::datalink::Channel::Ethernet;
-use pnet::datalink::{linux, DataLinkSender, FanoutOption, FanoutType, NetworkInterface};
-use pnet::packet::arp::{ArpHardwareTypes, ArpOperations, MutableArpPacket};
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
+use pnet::datalink::{linux, FanoutOption, FanoutType, NetworkInterface};
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::Packet;
-use pnet::util::MacAddr;
+use pnet::transport::transport_channel;
+use pnet::transport::TransportChannelType::Layer3;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-mod arp;
 mod backend;
 mod lb;
 mod utils;
@@ -135,9 +133,6 @@ fn process_packets(
         ),
     };
 
-    use pnet::packet::ip::IpNextHeaderProtocols;
-    use pnet::transport::transport_channel;
-    use pnet::transport::TransportChannelType::Layer3;
     let protocol = Layer3(IpNextHeaderProtocols::Tcp);
     let (mut ipv4_tx, _) = transport_channel(4096, protocol).unwrap();
 
@@ -154,21 +149,11 @@ fn process_packets(
                                     match MutableTcpPacket::owned(ip_header.payload().to_owned()) {
                                         Some(mut tcp_header) => {
                                             if tcp_header.get_destination() == lb.listen_port {
-                                                if let Some(processed_packet) = lb
-                                                    .client_handler(&mut ip_header, &mut tcp_header)
-                                                {
-                                                    match ipv4_tx.send_to(
-                                                        processed_packet.ip_header.to_immutable(),
-                                                        IpAddr::V4(
-                                                            processed_packet
-                                                                .ip_header
-                                                                .get_destination(),
-                                                        ),
-                                                    ) {
-                                                        Ok(_) => {}
-                                                        Err(e) => error!("{}", e),
-                                                    }
-
+                                                if let Some(processed_packet) = lb.client_handler(
+                                                    &mut ip_header,
+                                                    &mut tcp_header,
+                                                    &mut ipv4_tx,
+                                                ) {
                                                     stats.connections +=
                                                         &processed_packet.pkt_stats.connections;
                                                     stats.bytes_rx +=
@@ -195,21 +180,9 @@ fn process_packets(
                                                                 &mut ip_header,
                                                                 &mut tcp_header,
                                                                 cli_socket,
+                                                                &mut ipv4_tx,
                                                             )
                                                         {
-                                                            match ipv4_tx.send_to(
-                                                                processed_packet
-                                                                    .ip_header
-                                                                    .to_immutable(),
-                                                                IpAddr::V4(
-                                                                    processed_packet
-                                                                        .ip_header
-                                                                        .get_destination(),
-                                                                ),
-                                                            ) {
-                                                                Ok(_) => {}
-                                                                Err(e) => error!("{}", e),
-                                                            }
                                                             stats.connections += &processed_packet
                                                                 .pkt_stats
                                                                 .connections;
@@ -314,12 +287,14 @@ mod tests {
     extern crate hyper;
     use self::passthrough::backend::Node;
     use self::passthrough::process_packets;
-    use self::passthrough::utils::{build_dummy_ip, EPHEMERAL_PORT_LOWER};
+    use self::passthrough::utils::build_dummy_ip;
     use crate::config::Config;
     use crate::passthrough;
-    use pnet::datalink::{FanoutOption, FanoutType};
+    use pnet::packet::ip::IpNextHeaderProtocols;
     use pnet::packet::tcp::MutableTcpPacket;
     use pnet::packet::Packet;
+    use pnet::transport::transport_channel;
+    use pnet::transport::TransportChannelType::Layer3;
     use std::fs::File;
     use std::io::{Read, Write};
     use std::net::{IpAddr, SocketAddr};
@@ -399,10 +374,13 @@ mod tests {
 
         let dummy_ip = "127.0.0.1".parse().unwrap();
 
+        let protocol = Layer3(IpNextHeaderProtocols::Tcp);
+        let (mut ipv4_tx, _) = transport_channel(4096, protocol).unwrap();
+
         for i in 0..5 {
             let mut ip_header = build_dummy_ip(dummy_ip, dummy_ip, 35000 + i, 3000);
             let mut tcp_header = MutableTcpPacket::owned(ip_header.payload().to_owned()).unwrap();
-            lb.client_handler(&mut ip_header, &mut tcp_header);
+            lb.client_handler(&mut ip_header, &mut tcp_header, &mut ipv4_tx);
         }
 
         assert_eq!(lb.conn_tracker.read().unwrap().len(), 2);
@@ -471,22 +449,18 @@ mod tests {
     //     let lb = srv.lbs[0].clone();
     //
     //     let lb_ip = "127.0.0.1".parse().unwrap();
-    //     let interface = find_interface(lb_ip).unwrap();
-    //     let mut arp_cache = Arp::new(interface.clone(), lb_ip).unwrap();
     //
     //     let (outgoing_tx, outgoing_rx) = channel();
     //     let (stats_tx, _) = channel();
     //     let mut thread_lb = lb.clone();
     //     let fanout = Some(FanoutOption {
     //         group_id: 999,
-    //         fanout_type:  FanoutType::HASH,
+    //         fanout_type:  FanoutType::LB,
     //         defrag: true,
     //         rollover: false,
     //     });
     //     // set read/write timeouts to 0
-    //     let cfg = linux::Config {
-    //         read_timeout: Some(time::Duration::new(0, 0)),
-    //         write_timeout:Some(time::Duration::new(0, 0)),
+    //     let cfg = pnet::datalink::linux::Config {
     //         fanout: fanout,
     //         ..Default::default()
     //     };
@@ -496,9 +470,7 @@ mod tests {
     //             &mut thread_lb,
     //             iface,
     //             cfg,
-    //             outgoing_tx,
     //             stats_tx,
-    //             &mut arp_cache,
     //         );
     //     });
     //
@@ -573,7 +545,7 @@ mod tests {
     //         let mut thread_lb = lb.clone();
     //         let fanout = Some(FanoutOption {
     //             group_id: 999,
-    //             fanout_type:  FanoutType::HASH,
+    //             fanout_type:  FanoutType::LB,
     //             defrag: true,
     //             rollover: false,
     //         });
