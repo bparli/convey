@@ -9,16 +9,17 @@ use self::utils::{find_interface, ETHERNET_HEADER_LEN};
 
 use crate::config::{BaseConfig, Config};
 use crate::stats::StatsMssg;
+use ipnetwork::{IpNetwork, Ipv4Network};
 use pnet::datalink::Channel::Ethernet;
 use pnet::datalink::{linux, DataLinkSender, FanoutOption, FanoutType, NetworkInterface};
 use pnet::packet::arp::{ArpHardwareTypes, ArpOperations, MutableArpPacket};
-use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::Packet;
 use pnet::util::MacAddr;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
@@ -106,8 +107,6 @@ fn process_packets(
     interface: NetworkInterface,
     interface_cfg: linux::Config,
     stats_sender: Sender<StatsMssg>,
-    default_gw_mac: MacAddr,
-    arp_cache: &mut Arp,
 ) {
     let mut stats = StatsMssg {
         frontend: Some(lb.name.clone()),
@@ -127,7 +126,7 @@ fn process_packets(
     });
 
     // Create a new channel, dealing with layer 2 packets
-    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, interface_cfg) {
+    let (_, mut iface_rx) = match linux::channel(&interface, interface_cfg) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Unhandled channel type"),
         Err(e) => panic!(
@@ -136,12 +135,17 @@ fn process_packets(
         ),
     };
 
+    use pnet::packet::ip::IpNextHeaderProtocols;
+    use pnet::transport::transport_channel;
+    use pnet::transport::TransportChannelType::Layer3;
+    let protocol = Layer3(IpNextHeaderProtocols::Tcp);
+    let (mut ipv4_tx, _) = transport_channel(4096, protocol).unwrap();
+
     loop {
         match iface_rx.next() {
             Ok(frame) => {
-                let ethernet = MutableEthernetPacket::owned(frame.to_owned()).unwrap();
+                let ethernet = EthernetPacket::new(frame).unwrap();
                 match ethernet.get_ethertype() {
-                    EtherTypes::Arp => arp_cache.handle_arp(&ethernet),
                     EtherTypes::Ipv4 => {
                         match MutableIpv4Packet::owned(ethernet.payload().to_owned()) {
                             Some(mut ip_header) => {
@@ -149,28 +153,22 @@ fn process_packets(
                                 if dst == lb.listen_ip {
                                     match MutableTcpPacket::owned(ip_header.payload().to_owned()) {
                                         Some(mut tcp_header) => {
-                                            let listen_ip = lb.listen_ip;
                                             if tcp_header.get_destination() == lb.listen_port {
                                                 if let Some(processed_packet) = lb
                                                     .client_handler(&mut ip_header, &mut tcp_header)
                                                 {
-                                                    let mut target_mac = default_gw_mac;
-                                                    if let Some(mac_addr) = arp_cache.get_mac(dst) {
-                                                        target_mac = mac_addr;
-                                                    } else {
-                                                        send_arp(
-                                                            listen_ip,
-                                                            dst,
-                                                            &mut iface_tx,
-                                                            lb.iface.mac.unwrap(),
-                                                        )
+                                                    match ipv4_tx.send_to(
+                                                        processed_packet.ip_header.to_immutable(),
+                                                        IpAddr::V4(
+                                                            processed_packet
+                                                                .ip_header
+                                                                .get_destination(),
+                                                        ),
+                                                    ) {
+                                                        Ok(_) => {}
+                                                        Err(e) => error!("{}", e),
                                                     }
-                                                    fwd_packet(
-                                                        processed_packet.ip_header,
-                                                        target_mac,
-                                                        &mut iface_tx,
-                                                        lb.iface.mac.unwrap(),
-                                                    );
+
                                                     stats.connections +=
                                                         &processed_packet.pkt_stats.connections;
                                                     stats.bytes_rx +=
@@ -192,32 +190,26 @@ fn process_packets(
                                                         );
                                                         std::mem::drop(guard);
                                                         // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
-                                                        if let Some(processed_packet) =
-                                                            lb.server_response_handler(
+                                                        if let Some(processed_packet) = lb
+                                                            .server_response_handler(
                                                                 &mut ip_header,
                                                                 &mut tcp_header,
                                                                 cli_socket,
                                                             )
                                                         {
-                                                            let mut target_mac = default_gw_mac;
-                                                            if let Some(mac_addr) =
-                                                                arp_cache.get_mac(dst)
-                                                            {
-                                                                target_mac = mac_addr;
-                                                            } else {
-                                                                send_arp(
-                                                                    listen_ip,
-                                                                    dst,
-                                                                    &mut iface_tx,
-                                                                    lb.iface.mac.unwrap(),
-                                                                )
+                                                            match ipv4_tx.send_to(
+                                                                processed_packet
+                                                                    .ip_header
+                                                                    .to_immutable(),
+                                                                IpAddr::V4(
+                                                                    processed_packet
+                                                                        .ip_header
+                                                                        .get_destination(),
+                                                                ),
+                                                            ) {
+                                                                Ok(_) => {}
+                                                                Err(e) => error!("{}", e),
                                                             }
-                                                            fwd_packet(
-                                                                processed_packet.ip_header,
-                                                                target_mac,
-                                                                &mut iface_tx,
-                                                                lb.iface.mac.unwrap(),
-                                                            );
                                                             stats.connections += &processed_packet
                                                                 .pkt_stats
                                                                 .connections;
@@ -287,87 +279,13 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
         }
     };
 
-    let mut arp_cache = Arp::new(interface.clone(), lb.listen_ip).unwrap();
-
-
-    // Create a new channel, dealing with layer 2 packets
-    let (mut iface_tx, mut iface_rx) = match linux::channel(&interface, Default::default()) {
-        Ok(Ethernet(tx, rx)) => (tx, rx),
-        Ok(_) => panic!("Unhandled channel type"),
-        Err(e) => panic!(
-            "An error occurred when creating the datalink channel: {}",
-            e
-        ),
-    };
-
-    // make sure we get the default GW HW Address
-    let default_gw = arp_cache.default_gw;
-    let default_gw_mac: MacAddr;
-    loop {
-        // send arp requests for default gateway before we start processing
-        iface_tx.build_and_send(1, 42, &mut |eth_packet| {
-            let mut eth_packet = MutableEthernetPacket::new(eth_packet).unwrap();
-
-            eth_packet.set_destination(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
-            eth_packet.set_source(interface.mac.unwrap());
-            eth_packet.set_ethertype(EtherTypes::Arp);
-
-            let mut arp_buffer = [0u8; 28];
-            let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
-
-            arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
-            arp_packet.set_protocol_type(EtherTypes::Ipv4);
-            arp_packet.set_hw_addr_len(6);
-            arp_packet.set_proto_addr_len(4);
-            arp_packet.set_operation(ArpOperations::Request);
-            arp_packet.set_sender_hw_addr(interface.mac.unwrap());
-            arp_packet.set_sender_proto_addr(lb.listen_ip);
-            arp_packet.set_target_hw_addr(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
-            arp_packet.set_target_proto_addr(default_gw);
-
-            eth_packet.set_payload(arp_packet.packet());
-
-            debug!("Sending eth {:?}", eth_packet)
-        });
-        // loop until we've received the arp response from the default gateway
-        let wait = Duration::from_millis(200);
-        thread::sleep(wait);
-
-        match iface_rx.next() {
-            Ok(frame) => {
-                let ethernet = MutableEthernetPacket::owned(frame.to_owned()).unwrap();
-                match ethernet.get_ethertype() {
-                    EtherTypes::Arp => arp_cache.handle_arp(&ethernet),
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-
-        if let Some(mac) = arp_cache.clone().get_default_mac() {
-            default_gw_mac = mac;
-            break;
-        }
-        debug!("Sending another ARP request for Default Gateway's HW Addr");
-    }
-
     let cfg = setup_interface_cfg();
     // spawn the packet processing workers
     for _ in 0..lb.workers {
         let mut thread_lb = lb.clone();
         let iface = interface.clone();
         let thread_sender = sender.clone();
-        let mut thread_arp_cache = arp_cache.clone();
-        thread::spawn(move || {
-            process_packets(
-                &mut thread_lb,
-                iface,
-                cfg,
-                thread_sender,
-                default_gw_mac,
-                &mut thread_arp_cache,
-            )
-        });
+        thread::spawn(move || process_packets(&mut thread_lb, iface, cfg, thread_sender));
     }
 
     // start health checks in main thread
@@ -378,62 +296,10 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
     }
 }
 
-fn fwd_packet(
-    ip_header: &mut MutableIpv4Packet,
-    mac: MacAddr,
-    iface_tx: &mut Box<dyn DataLinkSender>,
-    interface_mac: MacAddr,
-) {
-    iface_tx.build_and_send(
-        1,
-        ip_header.packet().len() + ETHERNET_HEADER_LEN,
-        &mut |eth_packet| {
-            let mut eth_packet = MutableEthernetPacket::new(eth_packet).unwrap();
-
-            eth_packet.set_destination(mac);
-            eth_packet.set_source(interface_mac);
-            eth_packet.set_ethertype(EtherTypes::Ipv4);
-            eth_packet.set_payload(&ip_header.packet());
-
-            debug!("Sending eth {:?}", eth_packet)
-        },
-    );
-}
-
-fn send_arp(
-    listen_ip: Ipv4Addr,
-    ip_dest: Ipv4Addr,
-    iface_tx: &mut Box<dyn DataLinkSender>,
-    interface_mac: MacAddr,
-) {
-    iface_tx.build_and_send(1, 42, &mut |eth_packet| {
-        let mut eth_packet = MutableEthernetPacket::new(eth_packet).unwrap();
-
-        eth_packet.set_destination(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
-        eth_packet.set_source(interface_mac);
-        eth_packet.set_ethertype(EtherTypes::Arp);
-
-        let mut arp_buffer = [0u8; 28];
-        let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
-
-        arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
-        arp_packet.set_protocol_type(EtherTypes::Ipv4);
-        arp_packet.set_hw_addr_len(6);
-        arp_packet.set_proto_addr_len(4);
-        arp_packet.set_operation(ArpOperations::Request);
-        arp_packet.set_sender_hw_addr(interface_mac);
-        arp_packet.set_sender_proto_addr(listen_ip);
-        arp_packet.set_target_hw_addr(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
-        arp_packet.set_target_proto_addr(ip_dest);
-
-        eth_packet.set_payload(arp_packet.packet());
-    });
-}
-
 fn setup_interface_cfg() -> linux::Config {
     let fanout = Some(FanoutOption {
         group_id: rand::random::<u16>(),
-        fanout_type: FanoutType::HASH,
+        fanout_type: FanoutType::LB,
         defrag: true,
         rollover: false,
     });

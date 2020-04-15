@@ -147,9 +147,7 @@ impl LB {
                     // find local interface we should be listening on
                     // only use this for interface properties like mac addr
                     let interface = match find_interface(ip4) {
-                        Some(interface) => {
-                            interface
-                        }
+                        Some(interface) => interface,
                         None => {
                             error!(
                                 "Unable to find network interface with IP {:?}.  Skipping {}",
@@ -207,6 +205,7 @@ impl LB {
         ip_header: &'a mut MutableIpv4Packet<'a>,
         tcp_header: &mut MutableTcpPacket,
         client_addr: &SocketAddr,
+        ipv4_tx: &TransportSender,
     ) -> Option<Processed<'a>> {
         match client_addr.ip() {
             IpAddr::V4(client_ipv4) => {

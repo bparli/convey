@@ -7,14 +7,14 @@ use pnet::util::MacAddr;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use pnet::packet::ethernet::MutableEthernetPacket;
+use pnet::packet::ethernet::EthernetPacket;
 use pnet::packet::Packet;
 use std::sync::{Arc, RwLock};
 
 #[derive(Clone)]
 pub struct Arp {
     pub local: MacAddr,
-    network: Ipv4Network,
+    pub network: Ipv4Network,
     pub default_gw: Ipv4Addr,
     table: Arc<RwLock<Table>>,
 }
@@ -53,7 +53,7 @@ impl Arp {
         None
     }
 
-    pub fn handle_arp(&mut self, ethernet: &MutableEthernetPacket) {
+    pub fn handle_arp(&mut self, ethernet: &EthernetPacket) -> Option<(Ipv4Addr, MacAddr)> {
         let header = ArpPacket::new(ethernet.payload());
         if let Some(header) = header {
             if header.get_operation() == ArpOperations::Reply {
@@ -78,12 +78,14 @@ impl Arp {
                             debug!("Setting default gateway HW Address");
                             tb.default_gw_mac = Some(header.get_sender_hw_addr());
                         }
+                        return Some((header.get_sender_proto_addr(), header.get_sender_hw_addr()));
                     }
                 }
             }
         } else {
             error!("Malformed ARP Packet: {:?}", header);
         }
+        return None;
     }
 
     pub fn get_default_mac(self) -> Option<MacAddr> {
@@ -148,7 +150,7 @@ mod tests {
 
                     eth_header.set_payload(arp_packet.packet());
 
-                    test_arp.handle_arp(&eth_header);
+                    test_arp.handle_arp(&eth_header.to_immutable());
 
                     assert_eq!(
                         test_arp.get_mac(ip4).unwrap(),
