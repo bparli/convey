@@ -312,7 +312,7 @@ mod tests {
 
         // validate weighted scheduling
         for _ in 0..10 {
-            let mut resp = reqwest::get("http://127.0.0.1:3000").unwrap();
+            let mut resp = reqwest::get("http://127.0.0.1:8000").unwrap();
             assert_eq!(resp.status(), 200);
             assert!(resp.text().unwrap().contains("DummyA"));
         }
@@ -327,7 +327,7 @@ mod tests {
 
         // validate only DummyB is serving requests now that DummyA has been taken out of service (weight set to 0)
         for _ in 0..10 {
-            let mut resp = reqwest::get("http://127.0.0.1:3000").unwrap();
+            let mut resp = reqwest::get("http://127.0.0.1:8000").unwrap();
             assert_eq!(resp.status(), 200);
             assert!(resp.text().unwrap().contains("DummyB"));
         }

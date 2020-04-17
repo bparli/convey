@@ -287,17 +287,17 @@ mod tests {
     extern crate hyper;
     use self::passthrough::backend::Node;
     use self::passthrough::process_packets;
-    use self::passthrough::utils::build_dummy_ip;
+    use self::passthrough::utils::{find_interface, find_local_addr, build_dummy_ip, EPHEMERAL_PORT_LOWER};
     use crate::config::Config;
     use crate::passthrough;
     use pnet::packet::ip::IpNextHeaderProtocols;
-    use pnet::packet::tcp::MutableTcpPacket;
+    use pnet::packet::tcp::{TcpPacket, MutableTcpPacket};
     use pnet::packet::Packet;
-    use pnet::transport::transport_channel;
+    use pnet::transport::{ipv4_packet_iter, transport_channel};
     use pnet::transport::TransportChannelType::Layer3;
     use std::fs::File;
     use std::io::{Read, Write};
-    use std::net::{IpAddr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::mpsc::channel;
     use std::thread;
     use std::time;
@@ -441,167 +441,83 @@ mod tests {
         );
     }
 
-    // #[test]
-    // fn test_passthrough_process_packets() {
-    //     // load the loadbalancer
-    //     let conf = Config::new("testdata/passthrough_test.toml").unwrap();
-    //     let srv = passthrough::Server::new(conf, false);
-    //     let lb = srv.lbs[0].clone();
-    //
-    //     let lb_ip = "127.0.0.1".parse().unwrap();
-    //
-    //     let (outgoing_tx, outgoing_rx) = channel();
-    //     let (stats_tx, _) = channel();
-    //     let mut thread_lb = lb.clone();
-    //     let fanout = Some(FanoutOption {
-    //         group_id: 999,
-    //         fanout_type:  FanoutType::LB,
-    //         defrag: true,
-    //         rollover: false,
-    //     });
-    //     // set read/write timeouts to 0
-    //     let cfg = pnet::datalink::linux::Config {
-    //         fanout: fanout,
-    //         ..Default::default()
-    //     };
-    //     let iface = interface.clone();
-    //     thread::spawn(move || {
-    //         process_packets(
-    //             &mut thread_lb,
-    //             iface,
-    //             cfg,
-    //             stats_tx,
-    //         );
-    //     });
-    //
-    //     let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
-    //     let backend_srv_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
-    //
-    //     {
-    //         // set a backend server to healthy
-    //         let mut srvs_map = lb.backend.servers_map.write().unwrap();
-    //         let mut srvs_ring = lb.backend.ring.lock().unwrap();
-    //         let health = srvs_map
-    //             .get_mut(&SocketAddr::new(IpAddr::V4(backend_srv_ip), 3080))
-    //             .unwrap();
-    //         *health = true;
-    //         srvs_ring.add_node(&Node {
-    //             host: IpAddr::V4(backend_srv_ip),
-    //             port: 3080,
-    //         })
-    //     }
-    //
-    //     // simulated client packet
-    //     let test_eth = build_dummy_eth(client_ip, lb_ip, 35000, 3000);
-    //     // send to process packet thread
-    //     incoming_tx
-    //         .send(EthernetPacket::owned(test_eth.packet().to_owned()).unwrap())
-    //         .unwrap();
-    //
-    //     // read and verify the outgoing processed packet
-    //     let forward_pkt: &mut MutableIpv4Packet = outgoing_rx.recv().unwrap();
-    //     assert_eq!(forward_pkt.get_destination(), backend_srv_ip);
-    //     assert_eq!(forward_pkt.get_source(), lb_ip);
-    //
-    //     let tcp_resp = TcpPacket::new(forward_pkt.payload()).unwrap();
-    //     assert_eq!(tcp_resp.get_destination(), 3080);
-    //     assert_eq!(tcp_resp.get_source(), EPHEMERAL_PORT_LOWER + 1);
-    //
-    //     // simulated server response packet from port 3080 to "ephemeral" port mapped to client
-    //     let test_eth = build_dummy_eth(backend_srv_ip, lb_ip, 3080, EPHEMERAL_PORT_LOWER + 1);
-    //     // send to process packet thread
-    //     incoming_tx
-    //         .send(EthernetPacket::owned(test_eth.packet().to_owned()).unwrap())
-    //         .unwrap();
-    //     // read and verify the outgoing processed packet
-    //     let forward_pkt: &mut MutableIpv4Packet = outgoing_rx.recv().unwrap();
-    //     assert_eq!(forward_pkt.get_destination(), client_ip);
-    //     assert_eq!(forward_pkt.get_source(), lb_ip);
-    //
-    //     let tcp_resp = TcpPacket::new(forward_pkt.payload()).unwrap();
-    //     // packet should go back to client's actual ephemeral port
-    //     assert_eq!(tcp_resp.get_destination(), 35000);
-    //     assert_eq!(tcp_resp.get_source(), 3000);
-    // }
-    //
-    // #[test]
-    // fn test_dsr_process_packets() {
-    //     // load the loadbalancer
-    //     let conf = Config::new("testdata/passthrough_test.toml").unwrap();
-    //     // set dsr flag to true this time
-    //     let srv = passthrough::Server::new(conf, true);
-    //     let lb = srv.lbs[0].clone();
-    //
-    //     let lb_ip = "127.0.0.1".parse().unwrap();
-    //     // find local interface we should be listening on
-    //     //let interface = find_interface(lb.listen_ip).unwrap();
-    //     if let Some(interface) = find_interface(lb.listen_ip) {
-    //         let mut arp_cache = Arp::new(interface.clone(), lb_ip).unwrap();
-    //
-    //         let lb_ip = "127.0.0.1".parse().unwrap();
-    //         let (incoming_tx, _) = unbounded();
-    //         let (outgoing_tx, outgoing_rx) = channel();
-    //         let (stats_tx, _) = channel();
-    //         let mut thread_lb = lb.clone();
-    //         let fanout = Some(FanoutOption {
-    //             group_id: 999,
-    //             fanout_type:  FanoutType::LB,
-    //             defrag: true,
-    //             rollover: false,
-    //         });
-    //         // set read/write timeouts to 0
-    //         let cfg = linux::Config {
-    //             read_timeout: Some(time::Duration::new(0, 0)),
-    //             write_timeout:Some(time::Duration::new(0, 0)),
-    //             fanout: fanout,
-    //             ..Default::default()
-    //         };
-    //         let iface = interface.clone();
-    //         thread::spawn(move || {
-    //             process_packets(
-    //                 &mut thread_lb,
-    //                 iface,
-    //                 cfg,
-    //                 outgoing_tx,
-    //                 stats_tx,
-    //                 &mut arp_cache,
-    //             );
-    //         });
-    //
-    //         let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
-    //         let backend_srv_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
-    //
-    //         {
-    //             // set a backend server to healthy
-    //             let mut srvs_map = lb.backend.servers_map.write().unwrap();
-    //             let mut srvs_ring = lb.backend.ring.lock().unwrap();
-    //             let health = srvs_map
-    //                 .get_mut(&SocketAddr::new(IpAddr::V4(backend_srv_ip), 3080))
-    //                 .unwrap();
-    //             *health = true;
-    //             srvs_ring.add_node(&Node {
-    //                 host: IpAddr::V4(backend_srv_ip),
-    //                 port: 3080,
-    //             })
-    //         }
-    //
-    //         // simulated client packet
-    //         let test_eth = build_dummy_eth(client_ip, lb_ip, 35000, 3000);
-    //         // send to process packet thread
-    //         incoming_tx
-    //             .send(EthernetPacket::owned(test_eth.packet().to_owned()).unwrap())
-    //             .unwrap();
-    //
-    //         // read and verify the outgoing processed packet
-    //         let fwd_pkt: &mut MutableIpv4Packet = outgoing_rx.recv().unwrap();
-    //         assert_eq!(fwd_pkt.get_destination(), backend_srv_ip);
-    //         assert_eq!(fwd_pkt.get_source(), client_ip);
-    //
-    //         let tcp_resp = TcpPacket::new(fwd_pkt.payload()).unwrap();
-    //         assert_eq!(tcp_resp.get_destination(), 3080);
-    //         assert_eq!(tcp_resp.get_source(), 35000);
-    //     } else {
-    //         assert!(false)
-    //     }
-    // }
+    #[test]
+    fn test_passthrough_process_packets() {
+        // load the loadbalancer
+        let conf = Config::new("testdata/passthrough_test.toml").unwrap();
+        let srv = passthrough::Server::new(conf, false);
+        let mut lb = srv.lbs[0].clone();
+
+        let local_addr = find_local_addr().unwrap();
+        lb.listen_ip = local_addr;
+
+        let (stats_tx, _) = channel();
+        let mut thread_lb = lb.clone();
+        let cfg = self::passthrough::setup_interface_cfg();
+        let interface = find_interface(local_addr).unwrap();
+        let iface = interface.clone();
+        thread::spawn(move || {
+            process_packets(
+                &mut thread_lb,
+                iface,
+                cfg,
+                stats_tx,
+            );
+        });
+
+        {
+            // set a backend server to healthy
+            let mut srvs_map = lb.backend.servers_map.write().unwrap();
+            let mut srvs_ring = lb.backend.ring.lock().unwrap();
+            let health = srvs_map
+                .get_mut(&SocketAddr::new(
+                    IpAddr::V4("127.0.0.1".parse().unwrap()),
+                    3080,
+                ))
+                .unwrap();
+            *health = true;
+            srvs_ring.add_node(&Node {
+                host: IpAddr::V4("127.0.0.1".parse().unwrap()),
+                port: 3080,
+            })
+        }
+
+        let protocol = Layer3(IpNextHeaderProtocols::Tcp);
+        let (mut ipv4_tx, mut ipv4_rx) = transport_channel(4096, protocol).unwrap();
+
+        let client_ip: Ipv4Addr = "9.9.9.9".parse().unwrap();
+        let ip_header = build_dummy_ip(client_ip, local_addr, 35000, 3000);
+        ipv4_tx.send_to(ip_header, IpAddr::V4(local_addr)).unwrap();
+
+        let mut iter = ipv4_packet_iter(&mut ipv4_rx);
+
+        // listen for outgoing packet to backend sever
+        loop {
+            let (resp, _) = iter.next().unwrap();
+            if resp.get_source() == local_addr {
+                let tcp_resp = TcpPacket::new(resp.payload()).unwrap();
+                if tcp_resp.get_source() == EPHEMERAL_PORT_LOWER {
+                    assert_eq!(tcp_resp.get_destination(), 3080);
+                }
+                break;
+            }
+        }
+
+        // simulate server response
+        let server_ip: Ipv4Addr = "127.0.0.1".parse().unwrap();
+        let ip_header = build_dummy_ip(server_ip, local_addr, 3080, EPHEMERAL_PORT_LOWER);
+        ipv4_tx.send_to(ip_header, IpAddr::V4(local_addr)).unwrap();
+
+        // listen for outgoing packet back to client
+        loop {
+            let (resp, _) = iter.next().unwrap();
+            if resp.get_source() == server_ip {
+                let tcp_resp = TcpPacket::new(resp.payload()).unwrap();
+                if tcp_resp.get_source() == 3080 {
+                    assert_eq!(tcp_resp.get_destination(), EPHEMERAL_PORT_LOWER);
+                }
+                break;
+            }
+        }
+    }
 }
