@@ -19,12 +19,13 @@ pub const ETHERNET_HEADER_LEN: usize = 14;
 pub const IPV4_HEADER_LEN: usize = 20;
 pub const TCP_HEADER_LEN: usize = 32;
 
-pub fn find_local_addr() -> Option<IpAddr> {
+pub fn find_local_addr() -> Option<Ipv4Addr> {
     for iface in pnet::datalink::interfaces() {
-        if !iface.is_loopback() {
-            for ipnet in iface.ips {
-                if ipnet.is_ipv4() {
-                    return Some(ipnet.ip());
+        for ipnet in iface.ips {
+            if ipnet.is_ipv4() {
+                match ipnet.ip() {
+                    IpAddr::V4(ip) => return Some(ip),
+                    _ => continue,
                 }
             }
         }

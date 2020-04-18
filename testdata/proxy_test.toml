@@ -1,5 +1,5 @@
 [frontends.tcp_3000]
-listen_addr = "0.0.0.0:3000"
+listen_addr = "0.0.0.0:8000"
 backend = "tcp3000_out"
 
 [backends.tcp3000_out]

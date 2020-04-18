@@ -76,7 +76,7 @@ impl Backend {
             "Scheduling backend server for {} with ring {:?}",
             tuple, srvs_ring
         );
-        match srvs_ring.get_node(tuple.to_string().clone()) {
+        match srvs_ring.get_node(tuple.to_string()) {
             Some(node) => {
                 debug!("Scheduled backend server {:?} for tuple {}", node, tuple);
                 Some(node.clone())
@@ -85,7 +85,7 @@ impl Backend {
         }
     }
 
-    pub fn get_server_health(&self, server: Node) -> bool {
+    pub fn get_server_health(&self, server: &Node) -> bool {
         match self
             .servers_map
             .read()
@@ -167,8 +167,10 @@ fn simple_tcp_health_check(server: SocketAddr) -> bool {
 fn tcp_health_check(server: SocketAddr, ip: Ipv4Addr) -> bool {
     if let Some(sock) = allocate_socket(ip) {
         if let Ok(_) = sock.connect_timeout(&SockAddr::from(server), time::Duration::from_secs(3)) {
+            sock.shutdown(std::net::Shutdown::Both);
             return true;
         } else {
+            sock.shutdown(std::net::Shutdown::Both);
             return false;
         }
     }

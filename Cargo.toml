@@ -1,32 +1,31 @@
 [package]
 name = "convey"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["Ben Parli <bparli@gmail.com>"]
 edition = "2018"
 
 [dev-dependencies]
-restson = "^0.4.1"
-hyper = "0.12.9"
-reqwest = "0.9.5"
+restson = "0.4"
+hyper = "0.12"
+reqwest = "0.9"
 
 [dependencies]
-docopt = "1.0.2"
-log = "0.4.5"
-env_logger = "0.5.13"
+docopt = "1.0"
+log = "0.4"
+env_logger = "0.5"
 serde_derive = "1.0"
 serde = { version = "1.0", features = ["rc"] }
 serde_json = "1.0"
 toml = "0.4"
 tokio = { version = "0.2.8", features = ["full"] }
 futures = "0.3"
-iron = "0.4.0"
-router = "0.4.0"
+iron = "0.4"
+router = "0.4"
 rand = "0.7"
-notify = "4.0.13"
+notify = "4.0"
 hash_ring = { git = "https://github.com/bparli/rust-hash-ring", branch = "derive-clone-hashring" }
-pnet = "0.23.0"
-pnet_macros_support = "0.23.0"
+pnet = "0.25.0"
+pnet_macros_support = "0.25.0"
 lru_time_cache = "0.8"
-crossbeam-channel = "0.3"
-socket2 = "0.3.8"
-ipnetwork = "0.15"
+socket2 = "0.3"
+ipnetwork = "0.16"
