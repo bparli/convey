@@ -25,7 +25,7 @@ pub fn find_local_addr() -> Option<Ipv4Addr> {
             if ipnet.is_ipv4() {
                 match ipnet.ip() {
                     IpAddr::V4(ip) => return Some(ip),
-                    _ => continue
+                    _ => continue,
                 }
             }
         }

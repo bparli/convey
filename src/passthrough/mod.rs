@@ -287,14 +287,16 @@ mod tests {
     extern crate hyper;
     use self::passthrough::backend::Node;
     use self::passthrough::process_packets;
-    use self::passthrough::utils::{find_interface, find_local_addr, build_dummy_ip, EPHEMERAL_PORT_LOWER};
+    use self::passthrough::utils::{
+        build_dummy_ip, find_interface, find_local_addr, EPHEMERAL_PORT_LOWER,
+    };
     use crate::config::Config;
     use crate::passthrough;
     use pnet::packet::ip::IpNextHeaderProtocols;
-    use pnet::packet::tcp::{TcpPacket, MutableTcpPacket};
+    use pnet::packet::tcp::{MutableTcpPacket, TcpPacket};
     use pnet::packet::Packet;
-    use pnet::transport::{ipv4_packet_iter, transport_channel};
     use pnet::transport::TransportChannelType::Layer3;
+    use pnet::transport::{ipv4_packet_iter, transport_channel};
     use std::fs::File;
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -457,12 +459,7 @@ mod tests {
         let interface = find_interface(local_addr).unwrap();
         let iface = interface.clone();
         thread::spawn(move || {
-            process_packets(
-                &mut thread_lb,
-                iface,
-                cfg,
-                stats_tx,
-            );
+            process_packets(&mut thread_lb, iface, cfg, stats_tx);
         });
 
         {
