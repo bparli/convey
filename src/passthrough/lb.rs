@@ -11,7 +11,7 @@ use crate::stats::StatsMssg;
 use lru_time_cache::LruCache;
 use pnet::datalink::NetworkInterface;
 use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::ipv4::{checksum, MutableIpv4Packet};
+use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{tcp, Packet};
 use pnet::transport::TransportSender;
@@ -236,7 +236,10 @@ impl LB {
                 ip_header.set_destination(client_ipv4);
                 ip_header.set_source(self.listen_ip);
                 ip_header.set_header_length(5);
-                ip_header.set_checksum(checksum(&ip_header.to_immutable()));
+
+                // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
+                // will perform the checksum calculation on ip header anyway.  no need to do it twice
+                ip_header.set_checksum(0);
                 mssg.bytes_tx = tcp_header.payload().len() as u64;
 
                 match tcp_header.get_flags() {
@@ -322,7 +325,10 @@ impl LB {
 
                         ip_header.set_payload(&tcp_header.packet());
                         ip_header.set_destination(fwd_ipv4);
-                        ip_header.set_checksum(checksum(&ip_header.to_immutable()));
+
+                        // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
+                        // will perform the checksum calculation on ip header anyway.  no need to do it twice
+                        ip_header.set_checksum(0);
 
                         mssg.bytes_tx = tcp_header.payload().len() as u64;
                         match ipv4_tx.send_to(
@@ -388,7 +394,10 @@ impl LB {
 
                     ip_header.set_payload(&tcp_header.packet());
                     ip_header.set_destination(fwd_ipv4);
-                    ip_header.set_checksum(checksum(&ip_header.to_immutable()));
+
+                    // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
+                    // will perform the checksum calculation on ip header anyway.  no need to do it twice
+                    ip_header.set_checksum(0);
 
                     match ipv4_tx.send_to(
                         ip_header.to_immutable(),
@@ -448,7 +457,10 @@ impl LB {
             ip_header.set_payload(&tcp_header.packet());
             ip_header.set_total_length(tcp_header.packet().len() as u16 + IPV4_HEADER_LEN as u16);
             ip_header.set_destination(keep_client_ip);
-            ip_header.set_checksum(checksum(&ip_header.to_immutable()));
+
+            // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
+            // will perform the checksum calculation on ip header anyway.  no need to do it twice
+            ip_header.set_checksum(0);
 
             let mut connections = 0;
             if !self.dsr {
