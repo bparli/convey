@@ -68,11 +68,11 @@ In dsr mode the backend servers "participate" in that their response packets mus
 
 For dsr mode on backend servers
 ```
-sudo tc qdisc add dev enp0s8 root handle 10: htb
+sudo tc qdisc add dev <LOCAL_INTERFACE> root handle 10: htb
 
-sudo tc filter add dev enp0s8 parent 10: protocol ip prio 1 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff match ip dst <LOAD_BALANCER_IP> action ok
+sudo tc filter add dev <LOCAL_INTERFACE> parent 10: protocol ip prio 1 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff match ip dst <LOAD_BALANCER_IP> action ok
 
-sudo tc filter add dev enp0s8 parent 10: protocol ip prio 10 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff action nat egress 192.168.1.117 <LOAD_BALANCER_IP>
+sudo tc filter add dev <LOCAL_INTERFACE> parent 10: protocol ip prio 10 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff action nat egress <LOAD_BALANCER_IP>
 ```
 
 To run
