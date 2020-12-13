@@ -38,7 +38,7 @@ jobs:
       - run: >
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | 
           sh -s -- -v -y --profile minimal --default-toolchain <<parameters.toolchain>>
-      - run: sudo $HOME/.cargo/bin/cargo build
+      - run: sudo $HOME/.cargo/bin/cargo build --release
       - run: sudo $HOME/.cargo/bin/cargo test
       
 workflows:
