@@ -93,7 +93,7 @@ impl ServerPool {
 
         ServerPool {
             servers_map: backend_servers,
-            weights: weights,
+            weights,
             weighted_servers: weighted_backend_servers,
             dist: servers_dist,
         }
@@ -107,9 +107,9 @@ impl Backend {
         health_check_interval: u64,
     ) -> Backend {
         Backend {
-            name: name,
+            name,
             servers: Arc::new(RwLock::new(ServerPool::new_servers(servers))),
-            health_check_interval: health_check_interval,
+            health_check_interval,
         }
     }
 

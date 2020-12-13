@@ -89,8 +89,8 @@ pub fn run(lb_config: &BaseConfig) -> Sender<StatsMssg> {
         current_connections: 0,
         total_bytes_rx: 0,
         total_bytes_tx: 0,
-        frontends: frontends,
-        backends: backends,
+        frontends,
+        backends,
     }));
 
     let handler = StatsApi {
