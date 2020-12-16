@@ -433,7 +433,7 @@ impl LB {
                         ip_header,
                     })
                 }
-                _ => None
+                _ => None,
             }
         } else {
             error!("Unable to find backend");

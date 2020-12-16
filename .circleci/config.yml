@@ -23,7 +23,7 @@ jobs:
           command: rustup component add clippy
       - run:
           name: Run Clippy
-          command: sudo cargo clippy -- -W clippy::pedantic
+          command: cargo clippy -- -W clippy::pedantic
 
   build_and_test:
     parameters:
