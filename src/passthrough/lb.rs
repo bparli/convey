@@ -170,23 +170,23 @@ impl LB {
                         )),
                         port_mapper: Arc::new(RwLock::new(HashMap::new())),
                         next_port: Arc::new(Mutex::new(EPHEMERAL_PORT_LOWER)),
-                        workers: workers,
-                        dsr: dsr,
-                        stats_update_frequency: stats_update_frequency,
+                        workers,
+                        dsr,
+                        stats_update_frequency,
                     };
-                    return Some(new_lb);
+                    Some(new_lb)
                 }
                 _ => {
                     error!(
                         "Unable to configure load balancer server {:?}.  Only Ipv4 is supported",
                         front
                     );
-                    return None;
+                    None
                 }
             }
         } else {
             error!("Unable to configure load balancer server {:?}", front);
-            return None;
+            None
         }
     }
 
@@ -240,12 +240,12 @@ impl LB {
                 // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
                 // will perform the checksum calculation on ip header anyway.  no need to do it twice
                 ip_header.set_checksum(0);
-                
+
                 mssg.bytes_tx = tcp_header.payload().len() as u64;
 
                 match tcp_header.get_flags() {
-                    0b000010010 => mssg.connections = 1, // add a connection to count on SYN,ACK
-                    0b000010001 => mssg.connections = -1, // sub a connection to count on FIN,ACK
+                    0b0_0001_0010 => mssg.connections = 1, // add a connection to count on SYN,ACK
+                    0b0_0001_0001 => mssg.connections = -1, // sub a connection to count on FIN,ACK
                     _ => {}
                 }
 
@@ -259,12 +259,12 @@ impl LB {
 
                 return Some(Processed {
                     pkt_stats: mssg,
-                    ip_header: ip_header,
+                    ip_header,
                 });
             }
             _ => {} // ipv6 not supported (yet)
         }
-        return None;
+        None
     }
 
     // handle requests packets from a client
@@ -341,7 +341,7 @@ impl LB {
                         }
                         return Some(Processed {
                             pkt_stats: mssg,
-                            ip_header: ip_header,
+                            ip_header,
                         });
                     } else {
                         debug!(
@@ -414,7 +414,7 @@ impl LB {
                     let conn = Connection {
                         client: SocketAddr::new(IpAddr::V4(keep_client_ip), client_port),
                         backend_srv: node,
-                        ephem_port: ephem_port,
+                        ephem_port,
                     };
                     {
                         self.conn_tracker.write().unwrap().insert(cli, conn);
@@ -428,12 +428,12 @@ impl LB {
                             },
                         );
                     }
-                    return Some(Processed {
+                    Some(Processed {
                         pkt_stats: mssg,
-                        ip_header: ip_header,
-                    });
+                        ip_header,
+                    })
                 }
-                _ => return None,
+                _ => None
             }
         } else {
             error!("Unable to find backend");
@@ -442,7 +442,7 @@ impl LB {
             tcp_header.set_destination(tcp_header.get_source());
             if tcp_header.get_flags() == tcp::TcpFlags::SYN {
                 // reply ACK, RST
-                tcp_header.set_flags(0b000010100);
+                tcp_header.set_flags(0b0_0001_0100);
             } else {
                 tcp_header.set_flags(tcp::TcpFlags::RST);
             }
@@ -477,10 +477,10 @@ impl LB {
                 Err(e) => error!("{}", e),
             }
 
-            return Some(Processed {
+            Some(Processed {
                 pkt_stats: mssg,
-                ip_header: ip_header,
-            });
+                ip_header,
+            })
         }
     }
 
@@ -499,7 +499,7 @@ impl LB {
         if !self.dsr {
             new_source_ip = self.listen_ip;
         }
-        return (keep_client_ip, new_source_ip);
+        (keep_client_ip, new_source_ip)
     }
 }
 

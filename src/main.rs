@@ -13,7 +13,7 @@ mod stats;
 use self::config::Config;
 use docopt::Docopt;
 
-const USAGE: &'static str = "
+const USAGE: &str = "
 Convey 0.3.3
 
 Usage:

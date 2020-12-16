@@ -48,7 +48,7 @@ impl Server {
             }
         }
         Server {
-            lbs: lbs,
+            lbs,
             config_rx: config.subscribe(),
         }
     }
@@ -277,7 +277,7 @@ fn setup_interface_cfg() -> linux::Config {
         rollover: false,
     });
     linux::Config {
-        fanout: fanout,
+        fanout,
         ..Default::default()
     }
 }

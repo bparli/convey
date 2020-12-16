@@ -50,10 +50,10 @@ impl Backend {
     ) -> Backend {
         let pool = ServerPool::new_servers(servers);
         Backend {
-            name: name,
+            name,
             servers_map: Arc::new(RwLock::new(pool.servers_map)),
             ring: Arc::new(Mutex::new(pool.ring)),
-            health_check_interval: health_check_interval,
+            health_check_interval,
         }
     }
 
@@ -138,8 +138,6 @@ impl ServerPool {
                 } else {
                     backend_servers.insert(*server, false);
                 }
-            } else {
-                continue;
             }
         }
 
