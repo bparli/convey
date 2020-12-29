@@ -8,7 +8,6 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::prelude::*;
 
 mod backend;
 
@@ -152,7 +151,7 @@ async fn run_server(
     debug!("Listening on: {:?}", lb.listen_addr);
     debug!("Proxying to: {:?}", lb.backend);
 
-    let mut listener = TcpListener::bind(&lb.listen_addr).await?;
+    let listener = TcpListener::bind(&lb.listen_addr).await?;
 
     while let Ok((inbound, _)) = listener.accept().await {
         // clones for async thread
@@ -247,8 +246,7 @@ mod tests {
     extern crate hyper;
     use crate::config::Config;
     use crate::proxy;
-    use hyper::rt::{self, Future};
-    use hyper::service::service_fn_ok;
+    use hyper::service::{make_service_fn, service_fn};
     use hyper::{Body, Request, Response, Server};
     use std::fs::File;
     use std::io::{Read, Write};
@@ -272,71 +270,74 @@ mod tests {
 
     #[test]
     fn test_proxy() {
-        thread::spawn(|| {
-            let addr = ([127, 0, 0, 1], 8080).into();
-            let server = Server::bind(&addr)
-                .serve(|| {
-                    service_fn_ok(move |_: Request<Body>| {
-                        Response::new(Body::from("Success DummyA Server"))
-                    })
-                })
-                .map_err(|e| eprintln!("server error: {}", e));
-            rt::run(server);
-        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
 
-        thread::spawn(|| {
-            let addr = ([127, 0, 0, 1], 8081).into();
-            let server = Server::bind(&addr)
-                .serve(|| {
-                    service_fn_ok(move |_: Request<Body>| {
-                        Response::new(Body::from("Success DummyB Server"))
-                    })
-                })
-                .map_err(|e| eprintln!("server error: {}", e));
-            rt::run(server);
-        });
-
-        let conf = Config::new("testdata/proxy_test.toml").unwrap();
-        let mut lb = proxy::Server::new(conf);
-
-        //TODO: verify messages sent over channel to stats endpoint from proxy
-        let (tx, _) = channel();
-
-        let tx = tx.clone();
         thread::spawn(move || {
+            let conf = Config::new("testdata/proxy_test.toml").unwrap();
+            let mut lb = proxy::Server::new(conf);
+            //TODO: verify messages sent over channel to stats endpoint from proxy
+            let (tx, _) = channel();
             lb.run(tx);
         });
 
-        let two_secs = time::Duration::from_secs(2);
-        thread::sleep(two_secs);
+        rt.block_on(async {
+            tokio::spawn(async {
+                let addr_a = ([127, 0, 0, 1], 8080).into();
+                async fn dummy_a(_: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+                    Ok(Response::new(Body::from("Success DummyA Server")))
+                }
 
-        // validate weighted scheduling
-        for _ in 0..10 {
-            let mut resp = reqwest::get("http://127.0.0.1:8000").unwrap();
-            assert_eq!(resp.status(), 200);
-            assert!(resp.text().unwrap().contains("DummyA"));
-        }
+                let srv_a = Server::bind(&addr_a).serve(make_service_fn(|_| async {
+                    Ok::<_, hyper::Error>(service_fn(dummy_a))
+                }));
 
-        // update config to take DummyA out of service
-        update_config(
-            "testdata/proxy_test.toml",
-            "weight = 10000".to_string(),
-            "weight = 0".to_string(),
-        );
-        thread::sleep(two_secs);
+                srv_a.await
+            });
 
-        // validate only DummyB is serving requests now that DummyA has been taken out of service (weight set to 0)
-        for _ in 0..10 {
-            let mut resp = reqwest::get("http://127.0.0.1:8000").unwrap();
-            assert_eq!(resp.status(), 200);
-            assert!(resp.text().unwrap().contains("DummyB"));
-        }
+            tokio::spawn(async {
+                let addr_b = ([127, 0, 0, 1], 8081).into();
+                async fn dummy_b(_: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+                    Ok(Response::new(Body::from("Success DummyB Server")))
+                }
 
-        // reset fixture
-        update_config(
-            "testdata/proxy_test.toml",
-            "weight = 0".to_string(),
-            "weight = 10000".to_string(),
-        );
+                let srv_b = Server::bind(&addr_b).serve(make_service_fn(|_| async {
+                    Ok::<_, hyper::Error>(service_fn(dummy_b))
+                }));
+
+                srv_b.await
+            });
+
+            // validate weighted scheduling
+            for _ in 0..10 {
+                let mut resp = reqwest::blocking::get("http://127.0.0.1:8000").unwrap();
+                assert_eq!(resp.status(), 200);
+                assert!(resp.text().unwrap().contains("DummyA"));
+            }
+
+            // // update config to take DummyA out of service
+            update_config(
+                "testdata/proxy_test.toml",
+                "weight = 10000".to_string(),
+                "weight = 0".to_string(),
+            );
+
+            // let config propagate
+            let two_secs = time::Duration::from_secs(2);
+            thread::sleep(two_secs);
+
+            // validate only DummyB is serving requests now that DummyA has been taken out of service (weight set to 0)
+            for _ in 0..10 {
+                let mut resp = reqwest::blocking::get("http://127.0.0.1:8000").unwrap();
+                assert_eq!(resp.status(), 200);
+                assert!(resp.text().unwrap().contains("DummyB"));
+            }
+
+            // reset fixture
+            update_config(
+                "testdata/proxy_test.toml",
+                "weight = 0".to_string(),
+                "weight = 10000".to_string(),
+            );
+        });
     }
 }
