@@ -299,9 +299,7 @@ mod tests {
 
         let mut test_updates = HashMap::new();
         test_updates.insert(FromStr::from_str("127.0.0.1:8091").unwrap(), true);
-
-        let mut rt = runtime::Builder::new()
-            .basic_scheduler()
+        let rt = runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
@@ -331,8 +329,7 @@ mod tests {
         test_servers.insert(FromStr::from_str("127.0.0.1:8082").unwrap(), Some(20));
         let test_bck = Arc::new(Backend::new("test".to_string(), test_servers, 1000));
 
-        let mut rt = runtime::Builder::new()
-            .basic_scheduler()
+        let rt = runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
@@ -346,8 +343,7 @@ mod tests {
         let mut test_servers = HashMap::new();
         let test_addr = FromStr::from_str("127.0.0.1:8089").unwrap();
         test_servers.insert(test_addr, None);
-        let mut rt = runtime::Builder::new()
-            .basic_scheduler()
+        let rt = runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();

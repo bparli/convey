@@ -155,20 +155,12 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::stats;
-    use restson::{Error, RestClient, RestPath};
-
-    impl RestPath<()> for Stats {
-        fn get_path(_: ()) -> Result<String, Error> {
-            Ok(String::from("stats"))
-        }
-    }
 
     #[test]
     fn test_stats() {
         let conf = Config::new("testdata/test.toml").unwrap();
         let tx = stats::run(&conf.base);
-        let mut client = RestClient::new("http://127.0.0.1:7000/stats").unwrap();
-        let data: Stats = client.get(()).unwrap();
+        let mut data = reqwest::blocking::get("http://127.0.0.1:7000/stats").unwrap().json::<Stats>().unwrap();
 
         assert_eq!(data.total_connections, 0);
         let test_bck = data.backends.get("tcp3000_out").unwrap();
@@ -184,7 +176,7 @@ mod tests {
         };
         tx.send(test_mssg).unwrap();
 
-        let data: Stats = client.get(()).unwrap();
+        data = reqwest::blocking::get("http://127.0.0.1:7000/stats").unwrap().json::<Stats>().unwrap();
 
         assert_eq!(data.total_connections, 1);
         let test_bck = data.backends.get("tcp3000_out").unwrap();
