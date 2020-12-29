@@ -160,7 +160,10 @@ mod tests {
     fn test_stats() {
         let conf = Config::new("testdata/test.toml").unwrap();
         let tx = stats::run(&conf.base);
-        let mut data = reqwest::blocking::get("http://127.0.0.1:7000/stats").unwrap().json::<Stats>().unwrap();
+        let mut data = reqwest::blocking::get("http://127.0.0.1:7000/stats")
+            .unwrap()
+            .json::<Stats>()
+            .unwrap();
 
         assert_eq!(data.total_connections, 0);
         let test_bck = data.backends.get("tcp3000_out").unwrap();
@@ -176,7 +179,10 @@ mod tests {
         };
         tx.send(test_mssg).unwrap();
 
-        data = reqwest::blocking::get("http://127.0.0.1:7000/stats").unwrap().json::<Stats>().unwrap();
+        data = reqwest::blocking::get("http://127.0.0.1:7000/stats")
+            .unwrap()
+            .json::<Stats>()
+            .unwrap();
 
         assert_eq!(data.total_connections, 1);
         let test_bck = data.backends.get("tcp3000_out").unwrap();
