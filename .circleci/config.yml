@@ -30,8 +30,7 @@ jobs:
       toolchain:
         description: rust toolchain
         type: string
-    docker:
-      - image: buildpack-deps:trusty
+    machine: true
     steps:
       - checkout
       - run: >
