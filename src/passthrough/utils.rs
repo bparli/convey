@@ -1,7 +1,6 @@
 extern crate pnet;
 
-use pnet::datalink::{linux, MacAddr, NetworkInterface};
-use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
+use pnet::datalink::{linux, NetworkInterface};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
@@ -14,11 +13,13 @@ pub const HEALTH_PORT_LOWER: u16 = 32768;
 pub const HEALTH_PORT_UPPER: u16 = 33767;
 pub const EPHEMERAL_PORT_LOWER: u16 = 33768;
 pub const EPHEMERAL_PORT_UPPER: u16 = 61000;
-
-pub const ETHERNET_HEADER_LEN: usize = 14;
 pub const IPV4_HEADER_LEN: usize = 20;
 pub const TCP_HEADER_LEN: usize = 32;
 
+// leave for reference
+// pub const ETHERNET_HEADER_LEN: usize = 14;
+
+#[cfg(test)]
 pub fn find_local_addr() -> Option<Ipv4Addr> {
     for iface in pnet::datalink::interfaces() {
         for ipnet in iface.ips {
@@ -33,7 +34,7 @@ pub fn find_local_addr() -> Option<Ipv4Addr> {
     None
 }
 
-// only use in tests!
+#[cfg(test)]
 pub fn build_dummy_ip(
     src_ip: Ipv4Addr,
     dst_ip: Ipv4Addr,
@@ -74,27 +75,6 @@ pub fn build_dummy_ip(
     ip_header.set_checksum(checksum);
 
     ip_header
-}
-
-// only use in tests!
-pub fn build_dummy_eth(
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
-    src_port: u16,
-    dst_port: u16,
-) -> MutableEthernetPacket<'static> {
-    let ip_header = build_dummy_ip(src_ip, dst_ip, src_port, dst_port);
-
-    // Setup Ethernet header
-    let ethbuf: Vec<u8> = vec![0; TCP_HEADER_LEN + IPV4_HEADER_LEN + ETHERNET_HEADER_LEN];
-    let mut eth_header = MutableEthernetPacket::owned(ethbuf).unwrap();
-
-    eth_header.set_destination(MacAddr::new(255, 255, 255, 255, 255, 255));
-    eth_header.set_source(MacAddr::new(255, 255, 255, 255, 255, 255));
-    eth_header.set_ethertype(EtherTypes::Ipv4);
-    eth_header.set_payload(&ip_header.packet());
-
-    eth_header
 }
 
 // only use for health checks
