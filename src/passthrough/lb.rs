@@ -240,7 +240,7 @@ impl LB {
                 // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
                 // will perform the checksum calculation on ip header anyway.  no need to do it twice
                 ip_header.set_checksum(0);
-                
+
                 mssg.bytes_tx = tcp_header.payload().len() as u64;
 
                 match tcp_header.get_flags() {

@@ -277,7 +277,7 @@ mod tests {
             let mut lb = proxy::Server::new(conf);
             //TODO: verify messages sent over channel to stats endpoint from proxy
             let (tx, _) = channel();
-            lb.run(tx);
+            lb.run(tx).unwrap();
         });
 
         rt.block_on(async {
@@ -309,7 +309,7 @@ mod tests {
 
             // validate weighted scheduling
             for _ in 0..10 {
-                let mut resp = reqwest::blocking::get("http://127.0.0.1:8000").unwrap();
+                let resp = reqwest::blocking::get("http://127.0.0.1:8000").unwrap();
                 assert_eq!(resp.status(), 200);
                 assert!(resp.text().unwrap().contains("DummyA"));
             }
@@ -327,7 +327,7 @@ mod tests {
 
             // validate only DummyB is serving requests now that DummyA has been taken out of service (weight set to 0)
             for _ in 0..10 {
-                let mut resp = reqwest::blocking::get("http://127.0.0.1:8000").unwrap();
+                let resp = reqwest::blocking::get("http://127.0.0.1:8000").unwrap();
                 assert_eq!(resp.status(), 200);
                 assert!(resp.text().unwrap().contains("DummyB"));
             }
