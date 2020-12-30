@@ -70,7 +70,7 @@ impl Server {
                 );
                 let new_lb = Proxy {
                     name: name.clone(),
-                    listen_addr: listen_addr,
+                    listen_addr,
                     backend: Arc::new(backend),
                 };
                 new_server.proxies.push(Arc::new(new_lb));
@@ -226,8 +226,8 @@ async fn process(
                 frontend: Some(lb.name.clone()),
                 backend: lb.backend.name.clone(),
                 connections: -1,
-                bytes_tx: bytes_tx,
-                bytes_rx: bytes_rx,
+                bytes_tx,
+                bytes_rx,
                 servers: None,
             };
 

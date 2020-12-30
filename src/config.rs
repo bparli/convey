@@ -7,7 +7,6 @@ use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Duration;
-use toml;
 
 #[derive(Debug, Clone)]
 pub struct Config {

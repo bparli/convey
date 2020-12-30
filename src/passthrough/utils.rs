@@ -30,7 +30,7 @@ pub fn find_local_addr() -> Option<Ipv4Addr> {
             }
         }
     }
-    return None;
+    None
 }
 
 // only use in tests!
@@ -73,7 +73,7 @@ pub fn build_dummy_ip(
     let checksum = pnet::packet::ipv4::checksum(&ip_header.to_immutable());
     ip_header.set_checksum(checksum);
 
-    return ip_header;
+    ip_header
 }
 
 // only use in tests!
@@ -94,7 +94,7 @@ pub fn build_dummy_eth(
     eth_header.set_ethertype(EtherTypes::Ipv4);
     eth_header.set_payload(&ip_header.packet());
 
-    return eth_header;
+    eth_header
 }
 
 // only use for health checks
@@ -123,5 +123,5 @@ pub fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
             }
         }
     }
-    return None;
+    None
 }
