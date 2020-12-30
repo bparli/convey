@@ -14,7 +14,7 @@ use self::config::Config;
 use docopt::Docopt;
 
 const USAGE: &str = "
-Convey 0.3.3
+Convey 0.3.4
 
 Usage:
   convey
@@ -36,7 +36,7 @@ Options:
 
 fn main() {
     env_logger::init();
-    let version = "0.3.3".to_owned();
+    let version = "0.3.4".to_owned();
     let args = Docopt::new(USAGE)
         .and_then(|dopt| dopt.version(Some(version)).parse())
         .unwrap_or_else(|e| e.exit());

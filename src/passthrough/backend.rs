@@ -164,13 +164,15 @@ fn simple_tcp_health_check(server: SocketAddr) -> bool {
 // local port so as not to collide with load balanced packets
 fn tcp_health_check(server: SocketAddr, ip: Ipv4Addr) -> bool {
     if let Some(sock) = allocate_socket(ip) {
+        let mut result = false;
         if let Ok(_) = sock.connect_timeout(&SockAddr::from(server), time::Duration::from_secs(3)) {
-            sock.shutdown(std::net::Shutdown::Both);
-            return true;
-        } else {
-            sock.shutdown(std::net::Shutdown::Both);
-            return false;
+            result = true;
         }
+        match sock.shutdown(std::net::Shutdown::Both) {
+            Ok(_) => {}
+            Err(e) => error!("Issue shutting down socket {}", e),
+        }
+        return result;
     }
     error!("Unable to allocate port for health checking");
     true
