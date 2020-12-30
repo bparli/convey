@@ -9,22 +9,22 @@ hyper = { version = "0.14", features = ["full"] }
 reqwest = { version = "0.10", features = ["blocking", "json"] }
 
 [dependencies]
-docopt = "1.0"
+docopt = "1.1"
 log = "0.4"
-env_logger = "0.5"
+env_logger = "0.8"
 serde_derive = "1.0"
 serde = { version = "1.0", features = ["rc"] }
 serde_json = "1.0"
 toml = "0.4"
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
-iron = "0.4"
-router = "0.4"
+iron = "0.6"
+router = "0.6"
 rand = "0.7"
 notify = "4.0"
 hash_ring = { git = "https://github.com/bparli/rust-hash-ring", branch = "derive-clone-hashring" }
-pnet = "0.25.0"
-pnet_macros_support = "0.25.0"
+pnet = "0.27"
+pnet_macros_support = "0.27"
 lru_time_cache = "0.8"
 socket2 = "0.3"
 ipnetwork = "0.16"
