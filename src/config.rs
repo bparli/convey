@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error as IOError, Read};
 use std::result::Result;
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 use std::time::Duration;
 
@@ -31,6 +30,7 @@ pub struct Stats {
 pub struct FrontendConfig {
     pub listen_addr: String,
     pub backend: String,
+    pub xdp: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

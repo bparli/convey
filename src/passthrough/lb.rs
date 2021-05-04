@@ -11,10 +11,9 @@ use crate::stats::StatsMssg;
 use lru_time_cache::LruCache;
 use pnet::datalink::NetworkInterface;
 use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::ipv4::MutableIpv4Packet;
+use pnet::packet::ipv4::{checksum, MutableIpv4Packet};
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{tcp, Packet};
-use pnet::transport::TransportSender;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -82,6 +81,8 @@ pub struct LB {
 
     // How often to update the stats/counters.  5 seconds by default
     pub stats_update_frequency: u64,
+
+    pub xdp: bool,
 }
 
 pub struct Processed<'a> {
@@ -173,6 +174,7 @@ impl LB {
                         workers,
                         dsr,
                         stats_update_frequency,
+                        xdp: front.xdp.unwrap_or_default(),
                     };
                     Some(new_lb)
                 }
@@ -206,7 +208,7 @@ impl LB {
         ip_header: &'a mut MutableIpv4Packet<'a>,
         tcp_header: &mut MutableTcpPacket,
         client_addr: &SocketAddr,
-        ipv4_tx: &mut TransportSender,
+        xdp: bool,
     ) -> Option<Processed<'a>> {
         match client_addr.ip() {
             IpAddr::V4(client_ipv4) => {
@@ -237,9 +239,13 @@ impl LB {
                 ip_header.set_source(self.listen_ip);
                 ip_header.set_header_length(5);
 
-                // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
-                // will perform the checksum calculation on ip header anyway.  no need to do it twice
-                ip_header.set_checksum(0);
+                if xdp {
+                    ip_header.set_checksum(checksum(&ip_header.to_immutable()));
+                } else {
+                    // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
+                    // will perform the checksum calculation on ip header anyway.  no need to do it twice
+                    ip_header.set_checksum(0);
+                }
 
                 mssg.bytes_tx = tcp_header.payload().len() as u64;
 
@@ -249,13 +255,13 @@ impl LB {
                     _ => {}
                 }
 
-                match ipv4_tx.send_to(
-                    ip_header.to_immutable(),
-                    IpAddr::V4(ip_header.get_destination()),
-                ) {
-                    Ok(_) => {}
-                    Err(e) => error!("{}", e),
-                }
+                // match ipv4_tx.send_to(
+                //     ip_header.to_immutable(),
+                //     IpAddr::V4(ip_header.get_destination()),
+                // ) {
+                //     Ok(_) => {}
+                //     Err(e) => error!("{}", e),
+                // }
 
                 return Some(Processed {
                     pkt_stats: mssg,
@@ -272,7 +278,7 @@ impl LB {
         &mut self,
         ip_header: &'a mut MutableIpv4Packet<'a>,
         tcp_header: &mut MutableTcpPacket,
-        ipv4_tx: &mut TransportSender,
+        xdp: bool,
     ) -> Option<Processed<'a>> {
         let client_port = tcp_header.get_source();
 
@@ -327,18 +333,16 @@ impl LB {
                         ip_header.set_payload(&tcp_header.packet());
                         ip_header.set_destination(fwd_ipv4);
 
-                        // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
-                        // will perform the checksum calculation on ip header anyway.  no need to do it twice
-                        ip_header.set_checksum(0);
+                        if xdp {
+                            ip_header.set_checksum(checksum(&ip_header.to_immutable()));
+                        } else {
+                            // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
+                            // will perform the checksum calculation on ip header anyway.  no need to do it twice
+                            ip_header.set_checksum(0);
+                        }
 
                         mssg.bytes_tx = tcp_header.payload().len() as u64;
-                        match ipv4_tx.send_to(
-                            ip_header.to_immutable(),
-                            IpAddr::V4(ip_header.get_destination()),
-                        ) {
-                            Ok(_) => {}
-                            Err(e) => error!("{}", e),
-                        }
+                        
                         return Some(Processed {
                             pkt_stats: mssg,
                             ip_header,
@@ -396,16 +400,12 @@ impl LB {
                     ip_header.set_payload(&tcp_header.packet());
                     ip_header.set_destination(fwd_ipv4);
 
-                    // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
-                    // will perform the checksum calculation on ip header anyway.  no need to do it twice
-                    ip_header.set_checksum(0);
-
-                    match ipv4_tx.send_to(
-                        ip_header.to_immutable(),
-                        IpAddr::V4(ip_header.get_destination()),
-                    ) {
-                        Ok(_) => {}
-                        Err(e) => error!("{}", e),
+                    if xdp {
+                        ip_header.set_checksum(checksum(&ip_header.to_immutable()));
+                    } else {
+                        // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
+                        // will perform the checksum calculation on ip header anyway.  no need to do it twice
+                        ip_header.set_checksum(0);
                     }
 
                     mssg.bytes_tx = tcp_header.payload().len() as u64;
@@ -459,23 +459,19 @@ impl LB {
             ip_header.set_total_length(tcp_header.packet().len() as u16 + IPV4_HEADER_LEN as u16);
             ip_header.set_destination(keep_client_ip);
 
-            // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
-            // will perform the checksum calculation on ip header anyway.  no need to do it twice
-            ip_header.set_checksum(0);
+            if xdp {
+                ip_header.set_checksum(checksum(&ip_header.to_immutable()));
+            } else {
+                // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
+                // will perform the checksum calculation on ip header anyway.  no need to do it twice
+                ip_header.set_checksum(0);
+            }
 
             let mut connections = 0;
             if !self.dsr {
                 connections = -1;
             }
             mssg.connections = connections;
-
-            match ipv4_tx.send_to(
-                ip_header.to_immutable(),
-                IpAddr::V4(ip_header.get_destination()),
-            ) {
-                Ok(_) => {}
-                Err(e) => error!("{}", e),
-            }
 
             Some(Processed {
                 pkt_stats: mssg,
@@ -571,7 +567,7 @@ mod tests {
 
         // call client_handler and verify packet being sent out to healthy backend server
         let processed_packet = test_lb
-            .client_handler(&mut req_header, &mut tcp_header, &mut ipv4_tx)
+            .client_handler(&mut req_header, &mut tcp_header, false)
             .unwrap();
         assert_eq!(processed_packet.ip_header.get_destination(), backend_srv_ip);
         assert_eq!(processed_packet.ip_header.get_source(), lb_ip);
@@ -614,7 +610,7 @@ mod tests {
             let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
             let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
             let processed_packet = test_lb
-                .client_handler(&mut req_header, &mut tcp_header, &mut ipv4_tx)
+                .client_handler(&mut req_header, &mut tcp_header, false)
                 .unwrap();
             // next port should not have incremented
 
@@ -651,7 +647,7 @@ mod tests {
         // but need new request header
         let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
         let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
-        test_lb.client_handler(&mut req_header, &mut tcp_header, &mut ipv4_tx);
+        test_lb.client_handler(&mut req_header, &mut tcp_header, false);
         // since there are not healthy backend servers there should be no connections added to map
         assert_eq!(test_lb.conn_tracker.read().unwrap().len(), 0);
     }
@@ -678,7 +674,7 @@ mod tests {
                 &mut resp_header,
                 &mut tcp_header,
                 &SocketAddr::new(IpAddr::V4(client_ip), 55000),
-                &mut ipv4_tx,
+                false
             )
             .unwrap();
         assert_eq!(srv_resp.ip_header.get_destination(), client_ip);

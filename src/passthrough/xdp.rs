@@ -1,0 +1,268 @@
+use rebpf::{libbpf, interface, error as rebpf_error};
+use arraydeque::{ArrayDeque, Wrapping};
+use std::cmp::min;
+use std::sync::mpsc::Sender;
+use std::path::Path;
+use std::net::{SocketAddr, Ipv4Addr};
+
+use afxdp::buf::Buf;
+use afxdp::buf_mmap::BufMmap;
+use afxdp::mmap_area::{MmapArea, MmapAreaOptions};
+use afxdp::socket::{Socket, SocketOptions, SocketRx, SocketTx};
+use afxdp::umem::{Umem, UmemCompletionQueue, UmemFillQueue};
+use afxdp::PENDING_LEN;
+use libbpf_sys::{XSK_RING_CONS__DEFAULT_NUM_DESCS, XSK_RING_PROD__DEFAULT_NUM_DESCS};
+use pnet::packet::ethernet::MutableEthernetPacket;
+use pnet::packet::ipv4::MutableIpv4Packet;
+use pnet::packet::tcp::MutableTcpPacket;
+use pnet::packet::{MutablePacket, Packet};
+use pnet::datalink::NetworkInterface;
+use pnet::util::MacAddr;
+use crate::stats::StatsMssg;
+use super::lb::LB;
+use super::arp::{Arp, get_broadcast_addr};
+
+const BUF_NUM: usize = 65536;
+const BUF_LEN: usize = 4096;
+const BATCH_SIZE: usize = 64;
+
+struct XDPState<'a> {
+    cq: UmemCompletionQueue<'a, BufCustom>,
+    fq: UmemFillQueue<'a, BufCustom>,
+    rx: SocketRx<'a, BufCustom>,
+    tx: SocketTx<'a, BufCustom>,
+    fq_deficit: usize,
+}
+
+pub struct XDP<'a> {
+    state: XDPState<'a>,
+    arp_cache: Arp,
+}
+
+#[derive(Default, Copy, Clone)]
+struct BufCustom {}
+
+
+fn load_bpf(interface: &interface::Interface, bpf_program_path: &Path, xdp_flags: libbpf::XdpFlags) -> Result<(), rebpf_error::Error> {
+    let (bpf_object, bpf_fd) = libbpf::bpf_prog_load(bpf_program_path, libbpf::BpfProgType::XDP)?;
+    libbpf::bpf_set_link_xdp_fd(&interface, Some(&bpf_fd), xdp_flags)?;
+    let info = libbpf::bpf_obj_get_info_by_fd(&bpf_fd)?;
+    info!("Success Loading\n XDP prog name: {}, id {} on device: {}", info.name()?, info.id(), interface.ifindex());
+    
+    let _bpf_map = libbpf::bpf_object__find_map_by_name(&bpf_object, "xsks_map")?;
+
+    Ok(())
+}
+
+fn unload_bpf(interface: &interface::Interface, xdp_flags: libbpf::XdpFlags) -> Result<(), rebpf_error::Error> {
+    libbpf::bpf_set_link_xdp_fd(&interface, None, xdp_flags)?;
+    info!("Success Unloading.");
+
+    Ok(())
+}
+
+pub fn setup(iface: NetworkInterface, listen_ip: Ipv4Addr) -> Result<XDP<'static>, rebpf_error::Error> { 
+    let bpf_program_path = Path::new("af_xdp_kern.o");
+    let interface = interface::get_interface(iface.name.as_str())?;
+    let xdp_flags = libbpf::XdpFlags::UPDATE_IF_NOEXIST | libbpf::XdpFlags::DRV_MODE;
+    match load_bpf(&interface, bpf_program_path, xdp_flags) {
+        Ok(_) => {},
+        Err(e) => {
+            warn!("Unable to load BPF/XDP program, retrying in SKB Mode: {}", e);
+            let xdp_flags = libbpf::XdpFlags::UPDATE_IF_NOEXIST | libbpf::XdpFlags::SKB_MODE;
+            load_bpf(&interface, bpf_program_path, xdp_flags)?;
+        }
+    }
+
+    let options = MmapAreaOptions { huge_tlb: false };
+    let r = MmapArea::new(BUF_NUM, BUF_LEN, options);
+    let (area, mut bufs) = match r {
+        Ok((area, bufs)) => (area, bufs),
+        Err(err) => panic!("Unable to create mmap for XDP load balancing: {:?}", err),
+    };
+
+    let r = Umem::new(
+        area.clone(),
+        XSK_RING_CONS__DEFAULT_NUM_DESCS,
+        XSK_RING_PROD__DEFAULT_NUM_DESCS,
+    );
+    let (umem1, umem1cq, mut umem1fq) = match r {
+        Ok(umem) => umem,
+        Err(err) => panic!("Unable to create umem for XDP load balancing: {:?}", err),
+    };
+
+    let mut sock_opts = SocketOptions::default();
+    sock_opts.copy_mode = true;
+
+    let r = Socket::new(
+        umem1.clone(),
+        iface.name.as_str(),
+        0,
+        XSK_RING_CONS__DEFAULT_NUM_DESCS,
+        XSK_RING_PROD__DEFAULT_NUM_DESCS,
+        sock_opts,
+    );
+    let (_skt1, skt1rx, skt1tx) = match r {
+        Ok(skt) => skt,
+        Err(err) => panic!("Unable to create XSK for XDP load balancing: {:?}", err),
+    };
+
+    // Fill the Umem
+    let r = umem1fq.fill(
+        &mut bufs,
+        min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, BUF_NUM),
+    );
+    match r {
+        Ok(n) => {
+            if n != min(XSK_RING_PROD__DEFAULT_NUM_DESCS as usize, BUF_NUM) {
+                panic!(
+                    "Initial fill of umem incomplete. Wanted {} got {}.",
+                    BUF_NUM, n
+                );
+            }
+        }
+        Err(err) => panic!("error: {:?}", err),
+    }
+
+    let arp_cache = Arp::new(iface.clone(), listen_ip).unwrap();
+
+     Ok(XDP{state: XDPState {
+        cq: umem1cq,
+        fq: umem1fq,
+        rx: skt1rx,
+        tx: skt1tx,
+        fq_deficit: 0,
+        },
+        arp_cache: arp_cache,
+    })
+}
+
+fn forward(
+    tx: &mut SocketTx<BufCustom>,
+    bufs: &mut ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping>,
+    batch_size: usize,
+) -> Result<usize, ()> {
+    if bufs.is_empty() {
+        return Ok(0);
+    }
+
+    let r = tx.try_send(bufs, batch_size);
+    match r {
+        Ok(n) => Ok(n),
+        Err(e) => {
+            error!("Unable to forward packets via AF_XDP socket: {:?}", e);
+            Ok(0)
+        }
+    }
+}
+
+impl <'a> XDP <'a> {
+    pub fn run(
+        &mut self,
+        lb: &mut LB,
+        stats_sender: Sender<StatsMssg>,
+    ) {
+
+        let mut v: ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping> = ArrayDeque::new();
+        let custom = BufCustom {};
+
+        debug!("Starting XDP Loop");
+        loop {
+            let r = self.state.rx.try_recv(&mut v, BATCH_SIZE, custom);
+            match r {
+                Ok(n) => {
+                    if n > 0 {
+                        debug!("XDP Received {:?} packets", n);
+                        let r = self.process_packets(lb, &mut v);
+                        match r {
+                            Ok(_) => {}
+                            Err(e) => error!("XDP: Problem processing packets: {:?}", e),
+                        }
+
+                        self.state.fq_deficit += n;
+                    } else {
+                        if self.state.fq.needs_wakeup() {
+                            self.state.rx.wake();
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("XDP: {:?}", err);
+                }
+            }
+
+            let r = forward(&mut self.state.tx, &mut v, BATCH_SIZE);
+            match r {
+                Ok(n) => {
+                    if n > 0{
+                        debug!("XDP Sent {:?} packets", n)};
+                    }
+                Err(err) => error!("{:?}", err),
+                }
+        }
+    } 
+
+    fn process_packets(&mut self, lb: &mut LB, bufs: &mut ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping>) -> Result<(), ()> {
+        for buf in bufs {
+            let mut ethernet = MutableEthernetPacket::new(buf.get_data_mut()).unwrap();
+    
+            let mut ip_header = MutableIpv4Packet::new(ethernet.payload_mut()).unwrap();
+            match MutableTcpPacket::owned(ip_header.payload().to_owned()) {
+                Some(mut tcp_header) => {
+                    if tcp_header.get_destination() == lb.listen_port {
+                        if let Some(processed_packet) = lb.client_handler(
+                            &mut ip_header,
+                            &mut tcp_header,
+                            true
+                        ) {
+                            // set the appropriate ethernet destination on the mutated packet
+                            let target_mac: MacAddr;
+                            if let Some(mac_addr) = self.arp_cache.get_mac(processed_packet.ip_header.get_destination()) {
+                                target_mac = mac_addr;
+                            } else {
+                                target_mac = get_broadcast_addr();
+                            }
+                            ethernet.set_destination(target_mac);
+                        };
+                    } else if !lb.dsr {
+                        // only handling server repsonses if not using dsr
+                        let guard = lb.port_mapper.read().unwrap();
+                        let client_addr =
+                            guard.get(&tcp_header.get_destination());
+                        match client_addr {
+                            Some(client_addr) => {
+                                // drop the lock!
+                                let cli_socket = &SocketAddr::new(
+                                    client_addr.ip,
+                                    client_addr.port,
+                                );
+                                std::mem::drop(guard);
+                                // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
+                                if let Some(processed_packet) = lb
+                                    .server_response_handler(
+                                        &mut ip_header,
+                                        &mut tcp_header,
+                                        cli_socket,
+                                        true
+                                    )
+                                {
+                                   // set the appropriate ethernet destination on the mutated packet
+                                    let target_mac: MacAddr;
+                                    if let Some(mac_addr) = self.arp_cache.get_mac(processed_packet.ip_header.get_destination()) {
+                                        target_mac = mac_addr;
+                                    } else {
+                                        target_mac = get_broadcast_addr();
+                                    }
+                                    ethernet.set_destination(target_mac);
+                                };
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                None => {}
+            }              
+        }
+        Ok(())
+    }
+}

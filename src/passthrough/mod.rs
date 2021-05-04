@@ -23,10 +23,13 @@ use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
+use std::net::IpAddr;
 
 mod backend;
 mod lb;
 mod utils;
+mod xdp;
+mod arp;
 
 pub struct Server {
     // all the loadbalancers in this server.  Should be a 1x1 mapping between the elements in this vector
@@ -91,9 +94,21 @@ impl Server {
         for lb in self.lbs.iter() {
             let mut srv_thread = lb.clone();
             let thread_sender = sender.clone();
-            let _t = thread::spawn(move || {
-                run_server(&mut srv_thread, thread_sender);
-            });
+            if lb.xdp {
+                match xdp::setup(lb.iface.clone(), lb.listen_ip) {
+                    Ok(mut xdp_prog) => {
+                        let _t = thread::spawn(move || {
+                            run_xdp(&mut xdp_prog, &mut srv_thread, thread_sender); run_xdp
+                        });
+                    }
+                    Err(e) => error!("Unable to setup XDP for loadbalancer {:?}: {:?}", lb.name, e)
+                }
+                
+            } else {
+                let _t = thread::spawn(move || {
+                    run_server(&mut srv_thread, thread_sender);run_server
+                });
+            }
         }
         self.config_sync();
     }
@@ -142,7 +157,7 @@ fn process_packets(
                 let ethernet = EthernetPacket::new(frame).unwrap();
                 match ethernet.get_ethertype() {
                     EtherTypes::Ipv4 => {
-                        match MutableIpv4Packet::owned(ethernet.payload().to_owned()) {
+                        match MutableIpv4Packet::new(ethernet.payload().to_owned().as_mut()) {
                             Some(mut ip_header) => {
                                 let dst = ip_header.get_destination();
                                 if dst == lb.listen_ip {
@@ -152,8 +167,17 @@ fn process_packets(
                                                 if let Some(processed_packet) = lb.client_handler(
                                                     &mut ip_header,
                                                     &mut tcp_header,
-                                                    &mut ipv4_tx,
+                                                    false
                                                 ) {
+                                                    // send out the mutated packet
+                                                    match ipv4_tx.send_to(
+                                                        processed_packet.ip_header.to_immutable(),
+                                                        IpAddr::V4(processed_packet.ip_header.get_destination()),
+                                                    ) {
+                                                        Ok(_) => {}
+                                                        Err(e) => error!("{}", e),
+                                                    }
+                                                    // update stats
                                                     stats.connections +=
                                                         &processed_packet.pkt_stats.connections;
                                                     stats.bytes_rx +=
@@ -180,9 +204,18 @@ fn process_packets(
                                                                 &mut ip_header,
                                                                 &mut tcp_header,
                                                                 cli_socket,
-                                                                &mut ipv4_tx,
+                                                                false
                                                             )
                                                         {
+                                                            // send out the mutated packet
+                                                            match ipv4_tx.send_to(
+                                                                processed_packet.ip_header.to_immutable(),
+                                                                IpAddr::V4(processed_packet.ip_header.get_destination()),
+                                                            ) {
+                                                                Ok(_) => {}
+                                                                Err(e) => error!("{}", e),
+                                                            }
+                                                            // update stats
                                                             stats.connections += &processed_packet
                                                                 .pkt_stats
                                                                 .connections;
@@ -253,7 +286,7 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
     };
 
     let cfg = setup_interface_cfg();
-    // spawn the packet processing workers
+    //spawn the packet processing workers
     for _ in 0..lb.workers {
         let mut thread_lb = lb.clone();
         let iface = interface.clone();
@@ -267,6 +300,22 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
         let interval = Duration::from_secs(lb.backend.health_check_interval);
         thread::sleep(interval);
     }
+}
+
+pub fn run_xdp(prog: &mut xdp::XDP, lb: &mut LB, stats_sender: Sender<StatsMssg>) {
+    // start health checks 
+    let stats_backend = lb.backend.clone();
+    let listen_ip = lb.listen_ip.clone();
+    let interval = Duration::from_secs(lb.backend.health_check_interval);
+    let sender= stats_sender.clone();
+    thread::spawn(move || {
+        loop {
+            health_checker(stats_backend.clone(), &sender.clone(), listen_ip);
+            thread::sleep(interval);
+        }
+    });
+
+    prog.run(lb, stats_sender)
 }
 
 fn setup_interface_cfg() -> linux::Config {
@@ -382,7 +431,7 @@ mod tests {
         for i in 0..5 {
             let mut ip_header = build_dummy_ip(dummy_ip, dummy_ip, 35000 + i, 3000);
             let mut tcp_header = MutableTcpPacket::owned(ip_header.payload().to_owned()).unwrap();
-            lb.client_handler(&mut ip_header, &mut tcp_header, &mut ipv4_tx);
+            lb.client_handler(&mut ip_header, &mut tcp_header, false);
         }
 
         assert_eq!(lb.conn_tracker.read().unwrap().len(), 2);

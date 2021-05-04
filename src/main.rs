@@ -25,11 +25,14 @@ Usage:
   convey (-d | --dsr)
   convey (-h | --help)
   convey (-v | --version)
+  convey (-x | --xdp)
+  convey (-x | --xdp) --config=<config_file>
 
 Options:
   -h, --help               Show this screen.s
   -p, --passthrough        Run load balancer in passthrough mode (instead of default proxy mode)
   -d, --dsr                Run load balancer in direct server mode (instead of default proxy mode)
+  -x, --xdp                Run load balancer with XDP
   --config=<config_file>   Config file location [default config.toml].
   -v, --version            Show version.
 ";
