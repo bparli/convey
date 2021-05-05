@@ -342,7 +342,7 @@ impl LB {
                         }
 
                         mssg.bytes_tx = tcp_header.payload().len() as u64;
-                        
+
                         return Some(Processed {
                             pkt_stats: mssg,
                             ip_header,
@@ -674,7 +674,7 @@ mod tests {
                 &mut resp_header,
                 &mut tcp_header,
                 &SocketAddr::new(IpAddr::V4(client_ip), 55000),
-                false
+                false,
             )
             .unwrap();
         assert_eq!(srv_resp.ip_header.get_destination(), client_ip);

@@ -18,18 +18,18 @@ use pnet::packet::Packet;
 use pnet::transport::transport_channel;
 use pnet::transport::TransportChannelType::Layer3;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
-use std::net::IpAddr;
 
+mod arp;
 mod backend;
 mod lb;
 mod utils;
 mod xdp;
-mod arp;
 
 pub struct Server {
     // all the loadbalancers in this server.  Should be a 1x1 mapping between the elements in this vector
@@ -98,15 +98,19 @@ impl Server {
                 match xdp::setup(lb.iface.clone(), lb.listen_ip) {
                     Ok(mut xdp_prog) => {
                         let _t = thread::spawn(move || {
-                            run_xdp(&mut xdp_prog, &mut srv_thread, thread_sender); run_xdp
+                            run_xdp(&mut xdp_prog, &mut srv_thread, thread_sender);
+                            run_xdp
                         });
                     }
-                    Err(e) => error!("Unable to setup XDP for loadbalancer {:?}: {:?}", lb.name, e)
+                    Err(e) => error!(
+                        "Unable to setup XDP for loadbalancer {:?}: {:?}",
+                        lb.name, e
+                    ),
                 }
-                
             } else {
                 let _t = thread::spawn(move || {
-                    run_server(&mut srv_thread, thread_sender);run_server
+                    run_server(&mut srv_thread, thread_sender);
+                    run_server
                 });
             }
         }
@@ -167,12 +171,16 @@ fn process_packets(
                                                 if let Some(processed_packet) = lb.client_handler(
                                                     &mut ip_header,
                                                     &mut tcp_header,
-                                                    false
+                                                    false,
                                                 ) {
                                                     // send out the mutated packet
                                                     match ipv4_tx.send_to(
                                                         processed_packet.ip_header.to_immutable(),
-                                                        IpAddr::V4(processed_packet.ip_header.get_destination()),
+                                                        IpAddr::V4(
+                                                            processed_packet
+                                                                .ip_header
+                                                                .get_destination(),
+                                                        ),
                                                     ) {
                                                         Ok(_) => {}
                                                         Err(e) => error!("{}", e),
@@ -204,13 +212,19 @@ fn process_packets(
                                                                 &mut ip_header,
                                                                 &mut tcp_header,
                                                                 cli_socket,
-                                                                false
+                                                                false,
                                                             )
                                                         {
                                                             // send out the mutated packet
                                                             match ipv4_tx.send_to(
-                                                                processed_packet.ip_header.to_immutable(),
-                                                                IpAddr::V4(processed_packet.ip_header.get_destination()),
+                                                                processed_packet
+                                                                    .ip_header
+                                                                    .to_immutable(),
+                                                                IpAddr::V4(
+                                                                    processed_packet
+                                                                        .ip_header
+                                                                        .get_destination(),
+                                                                ),
                                                             ) {
                                                                 Ok(_) => {}
                                                                 Err(e) => error!("{}", e),
@@ -303,16 +317,14 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
 }
 
 pub fn run_xdp(prog: &mut xdp::XDP, lb: &mut LB, stats_sender: Sender<StatsMssg>) {
-    // start health checks 
+    // start health checks
     let stats_backend = lb.backend.clone();
     let listen_ip = lb.listen_ip.clone();
     let interval = Duration::from_secs(lb.backend.health_check_interval);
-    let sender= stats_sender.clone();
-    thread::spawn(move || {
-        loop {
-            health_checker(stats_backend.clone(), &sender.clone(), listen_ip);
-            thread::sleep(interval);
-        }
+    let sender = stats_sender.clone();
+    thread::spawn(move || loop {
+        health_checker(stats_backend.clone(), &sender.clone(), listen_ip);
+        thread::sleep(interval);
     });
 
     prog.run(lb, stats_sender)
