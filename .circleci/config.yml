@@ -14,17 +14,25 @@ jobs:
           command: cargo fmt -- --check
 
   clippy:
-    docker:
-      - image: cimg/rust:1.51.0
+    parameters:
+      toolchain:
+        description: rust toolchain
+        type: string
+    machine:
+      image: ubuntu-2004:202104-01
     steps:
       - checkout
-      - run: sudo apt install linux-headers-$(uname -r)
+      - run: >
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | 
+          sh -s -- -v -y --profile minimal --default-toolchain <<parameters.toolchain>>
+      - run: sudo apt-get update && sudo apt install linux-headers-$(uname -r)
+      - run: sudo apt install libelf-dev
       - run:
           name: Install cargo clippy
-          command: rustup component add clippy
+          command: $HOME/.cargo/bin/rustup component add clippy
       - run:
           name: Run Clippy
-          command: cargo clippy -- -W clippy::pedantic
+          command: $HOME/.cargo/bin/cargo clippy -- -W clippy::pedantic
 
   build_and_test:
     parameters:
@@ -38,10 +46,10 @@ jobs:
       - run: >
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | 
           sh -s -- -v -y --profile minimal --default-toolchain <<parameters.toolchain>>
-      - run: sudo apt install clang llvm libelf-dev libpcap-dev gcc-multilib build-essential
-      - run: sudo apt install linux-headers-$(uname -r)
+      - run: sudo apt-get update && sudo apt install linux-headers-$(uname -r)
+      - run: sudo apt install libelf-dev
       - run: $HOME/.cargo/bin/cargo build --release
-      - run: sudo $HOME/.cargo/bin/cargo test
+      - run: sudo -E $HOME/.cargo/bin/cargo test
       
 workflows:
   version: 2.1
