@@ -57,7 +57,7 @@ workflows:
   build:
     jobs:
       - lint
-      - clippy
+      - clippy:
           matrix:
             parameters:
               toolchain: ["stable"]
