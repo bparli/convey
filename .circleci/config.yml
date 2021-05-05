@@ -3,7 +3,7 @@ version: 2.1
 jobs:
   lint:
     docker:
-      - image: rust
+      - image: cimg/rust:1.51.0
     steps:
       - checkout
       - run:
@@ -15,9 +15,10 @@ jobs:
 
   clippy:
     docker:
-      - image: rust
+      - image: cimg/rust:1.51.0
     steps:
       - checkout
+      - run: sudo apt install linux-headers-$(uname -r)
       - run:
           name: Install cargo clippy
           command: rustup component add clippy
@@ -30,12 +31,15 @@ jobs:
       toolchain:
         description: rust toolchain
         type: string
-    machine: true
+    machine:
+      image: ubuntu-2004:202104-01
     steps:
       - checkout
       - run: >
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | 
           sh -s -- -v -y --profile minimal --default-toolchain <<parameters.toolchain>>
+      - run: sudo apt install clang llvm libelf-dev libpcap-dev gcc-multilib build-essential
+      - run: sudo apt install linux-headers-$(uname -r)
       - run: $HOME/.cargo/bin/cargo build --release
       - run: sudo $HOME/.cargo/bin/cargo test
       
