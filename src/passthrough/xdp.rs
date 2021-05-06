@@ -4,6 +4,9 @@ use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::mpsc::Sender;
+use std::thread;
+use std::time::Duration;
+use std::sync::mpsc;
 
 use super::arp::{get_broadcast_addr, Arp};
 use super::lb::LB;
@@ -32,6 +35,7 @@ struct XDPState<'a> {
     rx: SocketRx<'a, BufCustom>,
     tx: SocketTx<'a, BufCustom>,
     fq_deficit: usize,
+    mmap_bufs: Vec<BufMmap<'a, BufCustom>>,
 }
 
 pub struct XDP<'a> {
@@ -151,6 +155,7 @@ pub fn setup(
             rx: skt1rx,
             tx: skt1tx,
             fq_deficit: 0,
+            mmap_bufs: bufs,
         },
         arp_cache: arp_cache,
     })
@@ -182,17 +187,27 @@ impl<'a> XDP<'a> {
 
         debug!("Starting XDP Loop");
         loop {
+
+            //
+            // Service completion queue
+            //
+            let r = self.state.cq.service(&mut self.state.mmap_bufs, BATCH_SIZE);
+            match r {
+                Ok(n) => {}
+                Err(err) => panic!("error: {:?}", err),
+            }
+
+            // Receive ring
             let r = self.state.rx.try_recv(&mut v, BATCH_SIZE, custom);
             match r {
                 Ok(n) => {
                     if n > 0 {
                         debug!("XDP Received {:?} packets", n);
-                        let r = self.process_packets(lb, &mut v);
+                        let r = self.process_packets(lb, &mut v, &stats_sender);
                         match r {
                             Ok(_) => {}
                             Err(e) => error!("XDP: Problem processing packets: {:?}", e),
                         }
-
                         self.state.fq_deficit += n;
                     } else {
                         if self.state.fq.needs_wakeup() {
@@ -205,6 +220,7 @@ impl<'a> XDP<'a> {
                 }
             }
 
+            // forward
             let r = forward(&mut self.state.tx, &mut v, BATCH_SIZE);
             match r {
                 Ok(n) => {
@@ -214,6 +230,19 @@ impl<'a> XDP<'a> {
                 }
                 Err(err) => error!("{:?}", err),
             }
+
+            //
+            // Fill buffers if required
+            //
+            if self.state.fq_deficit > 0 {
+                let r = self.state.fq.fill(&mut self.state.mmap_bufs, self.state.fq_deficit);
+                match r {
+                    Ok(n) => {
+                        self.state.fq_deficit -= n;
+                    }
+                    Err(err) => panic!("error: {:?}", err),
+                }
+            }
         }
     }
 
@@ -221,7 +250,17 @@ impl<'a> XDP<'a> {
         &mut self,
         lb: &mut LB,
         bufs: &mut ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping>,
+        stats_sender: &Sender<StatsMssg>
     ) -> Result<(), ()> {
+        let mut stats = StatsMssg {
+            frontend: Some(lb.name.clone()),
+            backend: lb.backend.name.clone(),
+            connections: 0,
+            bytes_tx: 0,
+            bytes_rx: 0,
+            servers: None,
+        };
+
         for buf in bufs {
             let mut ethernet = MutableEthernetPacket::new(buf.get_data_mut()).unwrap();
 
@@ -242,7 +281,12 @@ impl<'a> XDP<'a> {
                             } else {
                                 target_mac = get_broadcast_addr();
                             }
+                            stats.connections += &processed_packet.pkt_stats.connections;
+                            stats.bytes_rx += &processed_packet.pkt_stats.bytes_rx;
+                            stats.bytes_tx += &processed_packet.pkt_stats.bytes_tx;
+
                             ethernet.set_destination(target_mac);
+                            // update stats
                         };
                     } else if !lb.dsr {
                         // only handling server repsonses if not using dsr
@@ -270,6 +314,12 @@ impl<'a> XDP<'a> {
                                     } else {
                                         target_mac = get_broadcast_addr();
                                     }
+
+                                    // update stats
+                                    stats.connections += &processed_packet.pkt_stats.connections;
+                                    stats.bytes_rx += &processed_packet.pkt_stats.bytes_rx;
+                                    stats.bytes_tx += &processed_packet.pkt_stats.bytes_tx;
+
                                     ethernet.set_destination(target_mac);
                                 };
                             }
@@ -279,6 +329,12 @@ impl<'a> XDP<'a> {
                 }
                 None => {}
             }
+        }
+        
+        // send the counters we've gathered for this bundle of packets
+        match stats_sender.send(stats) {
+            Ok(_) => {},
+            Err(e) => error!("Error sending stats message on channel: {}", e)
         }
         Ok(())
     }

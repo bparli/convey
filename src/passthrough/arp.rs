@@ -134,6 +134,7 @@ impl Arp {
                 return Some(mac.clone());
             }
             // missing ip in our arp cache, send out an Arp request
+            debug!("Missing address in arp cache, sending arp request");
             match self.broadcast_tx.send(ip) {
                 Ok(_) => {}
                 Err(e) => {
