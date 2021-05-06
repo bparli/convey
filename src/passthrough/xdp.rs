@@ -3,10 +3,10 @@ use rebpf::{error as rebpf_error, interface, libbpf};
 use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
-use std::sync::mpsc;
 
 use super::arp::{get_broadcast_addr, Arp};
 use super::lb::LB;
@@ -187,7 +187,6 @@ impl<'a> XDP<'a> {
 
         debug!("Starting XDP Loop");
         loop {
-
             //
             // Service completion queue
             //
@@ -235,7 +234,10 @@ impl<'a> XDP<'a> {
             // Fill buffers if required
             //
             if self.state.fq_deficit > 0 {
-                let r = self.state.fq.fill(&mut self.state.mmap_bufs, self.state.fq_deficit);
+                let r = self
+                    .state
+                    .fq
+                    .fill(&mut self.state.mmap_bufs, self.state.fq_deficit);
                 match r {
                     Ok(n) => {
                         self.state.fq_deficit -= n;
@@ -250,7 +252,7 @@ impl<'a> XDP<'a> {
         &mut self,
         lb: &mut LB,
         bufs: &mut ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping>,
-        stats_sender: &Sender<StatsMssg>
+        stats_sender: &Sender<StatsMssg>,
     ) -> Result<(), ()> {
         let mut stats = StatsMssg {
             frontend: Some(lb.name.clone()),
@@ -330,11 +332,11 @@ impl<'a> XDP<'a> {
                 None => {}
             }
         }
-        
+
         // send the counters we've gathered for this bundle of packets
         match stats_sender.send(stats) {
-            Ok(_) => {},
-            Err(e) => error!("Error sending stats message on channel: {}", e)
+            Ok(_) => {}
+            Err(e) => error!("Error sending stats message on channel: {}", e),
         }
         Ok(())
     }
