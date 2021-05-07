@@ -255,14 +255,6 @@ impl LB {
                     _ => {}
                 }
 
-                // match ipv4_tx.send_to(
-                //     ip_header.to_immutable(),
-                //     IpAddr::V4(ip_header.get_destination()),
-                // ) {
-                //     Ok(_) => {}
-                //     Err(e) => error!("{}", e),
-                // }
-
                 return Some(Processed {
                     pkt_stats: mssg,
                     ip_header,

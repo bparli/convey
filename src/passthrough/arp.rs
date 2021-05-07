@@ -199,7 +199,7 @@ fn l2_broadcast_arp(
                 iface_tx.build_and_send(1, 42, &mut |eth_packet| {
                     let mut eth_packet = MutableEthernetPacket::new(eth_packet).unwrap();
 
-                    eth_packet.set_destination(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
+                    eth_packet.set_destination(get_broadcast_addr());
                     eth_packet.set_source(mac_addr);
                     eth_packet.set_ethertype(EtherTypes::Arp);
 
@@ -213,7 +213,7 @@ fn l2_broadcast_arp(
                     arp_packet.set_operation(ArpOperations::Request);
                     arp_packet.set_sender_hw_addr(mac_addr);
                     arp_packet.set_sender_proto_addr(local_ip);
-                    arp_packet.set_target_hw_addr(MacAddr::new(0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
+                    arp_packet.set_target_hw_addr(get_broadcast_addr());
                     arp_packet.set_target_proto_addr(ipv4_addr);
 
                     eth_packet.set_payload(arp_packet.packet());
