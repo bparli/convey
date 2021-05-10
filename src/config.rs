@@ -30,7 +30,13 @@ pub struct Stats {
 pub struct FrontendConfig {
     pub listen_addr: String,
     pub backend: String,
-    pub xdp: Option<bool>,
+    pub xdp: Option<XdpConfig>,
+}
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct XdpConfig {
+    pub bpf_program_path: String,
+    pub progsec_name: String,
+    pub xsks_map_name: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

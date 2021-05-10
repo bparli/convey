@@ -95,17 +95,23 @@ impl Server {
             let mut srv_thread = lb.clone();
             let thread_sender = sender.clone();
             if lb.xdp {
-                match xdp::setup(lb.iface.clone(), lb.listen_ip) {
-                    Ok(mut xdp_prog) => {
-                        let _t = thread::spawn(move || {
-                            run_xdp(&mut xdp_prog, &mut srv_thread, thread_sender);
-                            run_xdp
-                        });
+                if let Some(xdp_conf) = &lb.xdp_config {
+                    match xdp::setup(lb.iface.clone(), lb.listen_ip, &xdp_conf.bpf_program_path, &xdp_conf.progsec_name, &xdp_conf.xsks_map_name) {
+                        Ok(mut xdp_prog) => {
+                            let _t = thread::spawn(move || {
+                                run_xdp(&mut xdp_prog, &mut srv_thread, thread_sender);
+                                run_xdp
+                            });
+                        }
+                        Err(e) => error!(
+                            "Unable to setup XDP for loadbalancer {:?}: {:?}",
+                            lb.name, e
+                        ),
                     }
-                    Err(e) => error!(
-                        "Unable to setup XDP for loadbalancer {:?}: {:?}",
-                        lb.name, e
-                    ),
+                } else {
+                    error!(
+                        "Unable to setup XDP for loadbalancer {:?}.  Check XDP config",
+                        lb.name);
                 }
             } else {
                 let _t = thread::spawn(move || {

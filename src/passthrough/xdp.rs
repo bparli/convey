@@ -50,8 +50,13 @@ fn load_bpf(
     interface: &interface::Interface,
     bpf_program_path: &Path,
     xdp_flags: libbpf::XdpFlags,
+    progsec: &str,
+    map_name: &str,
 ) -> Result<(), rebpf_error::Error> {
-    let (bpf_object, bpf_fd) = libbpf::bpf_prog_load(bpf_program_path, libbpf::BpfProgType::XDP)?;
+    let (bpf_object, _bpf_fd) = libbpf::bpf_prog_load(bpf_program_path, libbpf::BpfProgType::XDP)?;
+    let bpf_prog = libbpf::bpf_object__find_program_by_title(&bpf_object, progsec)?;
+    let bpf_fd = libbpf::bpf_program__fd(&bpf_prog)?;
+    
     libbpf::bpf_set_link_xdp_fd(&interface, Some(&bpf_fd), xdp_flags)?;
     let info = libbpf::bpf_obj_get_info_by_fd(&bpf_fd)?;
     info!(
@@ -61,7 +66,7 @@ fn load_bpf(
         interface.ifindex()
     );
 
-    let _bpf_map = libbpf::bpf_object__find_map_by_name(&bpf_object, "xsks_map")?;
+    let _bpf_map = libbpf::bpf_object__find_map_by_name(&bpf_object, map_name)?;
 
     Ok(())
 }
@@ -79,11 +84,14 @@ fn unload_bpf(
 pub fn setup(
     iface: NetworkInterface,
     listen_ip: Ipv4Addr,
+    bpf_program_path: &str,
+    progsec: &str,
+    xsks_map_name: &str,
 ) -> Result<XDP<'static>, rebpf_error::Error> {
-    let bpf_program_path = Path::new("af_xdp_kern.o");
+    let bpf_program = Path::new(&bpf_program_path);
     let interface = interface::get_interface(iface.name.as_str())?;
     let xdp_flags = libbpf::XdpFlags::UPDATE_IF_NOEXIST | libbpf::XdpFlags::DRV_MODE;
-    match load_bpf(&interface, bpf_program_path, xdp_flags) {
+    match load_bpf(&interface, bpf_program, xdp_flags, progsec, xsks_map_name) {
         Ok(_) => {}
         Err(e) => {
             warn!(
@@ -91,7 +99,7 @@ pub fn setup(
                 e
             );
             let xdp_flags = libbpf::XdpFlags::UPDATE_IF_NOEXIST | libbpf::XdpFlags::SKB_MODE;
-            load_bpf(&interface, bpf_program_path, xdp_flags)?;
+            load_bpf(&interface, bpf_program, xdp_flags, progsec, xsks_map_name)?;
         }
     }
 

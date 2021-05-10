@@ -6,7 +6,7 @@ use crate::passthrough;
 use self::passthrough::backend::{Backend, Node};
 use self::passthrough::utils::find_interface;
 use self::passthrough::utils::{EPHEMERAL_PORT_LOWER, EPHEMERAL_PORT_UPPER, IPV4_HEADER_LEN};
-use crate::config::Config;
+use crate::config::{Config, XdpConfig};
 use crate::stats::StatsMssg;
 use lru_time_cache::LruCache;
 use pnet::datalink::NetworkInterface;
@@ -83,6 +83,8 @@ pub struct LB {
     pub stats_update_frequency: u64,
 
     pub xdp: bool,
+
+    pub xdp_config: Option<XdpConfig>,
 }
 
 pub struct Processed<'a> {
@@ -158,6 +160,13 @@ impl LB {
                             return None;
                         }
                     };
+                    let mut xdp = false;
+                    let mut xdp_config = None;
+                    if let Some(xdp_conf) = front.xdp.clone() {
+                        xdp_config = Some(xdp_conf);
+                        xdp = true;   
+                    }; 
+                   
                     let new_lb = LB {
                         name: frontend_name.clone(),
                         listen_ip: ip4,
@@ -174,7 +183,8 @@ impl LB {
                         workers,
                         dsr,
                         stats_update_frequency,
-                        xdp: front.xdp.unwrap_or_default(),
+                        xdp,
+                        xdp_config, 
                     };
                     Some(new_lb)
                 }

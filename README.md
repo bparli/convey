@@ -72,13 +72,23 @@ sudo tc qdisc add dev <LOCAL_INTERFACE> root handle 10: htb
 
 sudo tc filter add dev <LOCAL_INTERFACE> parent 10: protocol ip prio 1 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff match ip dst <LOAD_BALANCER_IP> action ok
 
-sudo tc filter add dev <LOCAL_INTERFACE> parent 10: protocol ip prio 10 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff action nat egress <LOAD_BALANCER_IP>
+sudo tc filter add dev <LOCAL_INTERFACE> parent 10: protocol ip prio 10 u32 match ip src <LOCAL_SERVER_IP> match ip sport <LISTEN_PORT> 0xffff action nat egress <LOCAL_SERVER_IP> <LOAD_BALANCER_IP>
 ```
 
 To run
 ```
 sudo ./target/release/convey --dsr --config=sample-passthrough.toml
 ```
+
+### AF_XDP
+This branch also can bypass the kernel network stack and pass raw frames directly to the loadbalcner using AF_XDP.  Note this requires kernel 5.4 or above.  To do so:
+
+1.  Under the `ebpf` folder, update `af_xdp_kern.c` to suit your needs.  Currently, it will redirect port 3000 as well as Convey ephemeral ports to userspace.  Anything else will be passed along to the kernel network stack.
+2.  Run `make` to compile your ebpf object.  Also, copy the output object (`af_xdp_kern.o`) someplace for running Convey. 
+3.  Update the optional section of the config file to set the name of the bpf program (`xdp_filter_3000` in this example), the xsks map name, and the path to the bpf program object file (created in step 2).  See `sample-passthrough.toml` for an example.
+4.  Thats it! Run convey in passthrough mode as above.  It supports both DSR and passthrough.  See https://github.com/xdp-project/xdp-tutorial/tree/master/advanced03-AF_XDP for more background on AF_XDP.
+
+You may also need to manually remove the xdp program from your interface afterward; `sudo ip link set dev <interface> xdp off` 
 
 ### Proxy
 No special setup neccessary

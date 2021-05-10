@@ -1,0 +1,6 @@
+[submodule "ebpf/xdp-tutorial"]
+	path = ebpf/xdp-tutorial
+	url = https://github.com/xdp-project/xdp-tutorial
+[submodule "ebpf/libbpf"]
+	path = ebpf/libbpf
+	url = https://github.com/libbpf/libbpf
