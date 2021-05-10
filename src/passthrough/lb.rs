@@ -164,9 +164,9 @@ impl LB {
                     let mut xdp_config = None;
                     if let Some(xdp_conf) = front.xdp.clone() {
                         xdp_config = Some(xdp_conf);
-                        xdp = true;   
-                    }; 
-                   
+                        xdp = true;
+                    };
+
                     let new_lb = LB {
                         name: frontend_name.clone(),
                         listen_ip: ip4,
@@ -184,7 +184,7 @@ impl LB {
                         dsr,
                         stats_update_frequency,
                         xdp,
-                        xdp_config, 
+                        xdp_config,
                     };
                     Some(new_lb)
                 }

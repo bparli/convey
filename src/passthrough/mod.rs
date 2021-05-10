@@ -96,7 +96,13 @@ impl Server {
             let thread_sender = sender.clone();
             if lb.xdp {
                 if let Some(xdp_conf) = &lb.xdp_config {
-                    match xdp::setup(lb.iface.clone(), lb.listen_ip, &xdp_conf.bpf_program_path, &xdp_conf.progsec_name, &xdp_conf.xsks_map_name) {
+                    match xdp::setup(
+                        lb.iface.clone(),
+                        lb.listen_ip,
+                        &xdp_conf.bpf_program_path,
+                        &xdp_conf.progsec_name,
+                        &xdp_conf.xsks_map_name,
+                    ) {
                         Ok(mut xdp_prog) => {
                             let _t = thread::spawn(move || {
                                 run_xdp(&mut xdp_prog, &mut srv_thread, thread_sender);
@@ -111,7 +117,8 @@ impl Server {
                 } else {
                     error!(
                         "Unable to setup XDP for loadbalancer {:?}.  Check XDP config",
-                        lb.name);
+                        lb.name
+                    );
                 }
             } else {
                 let _t = thread::spawn(move || {

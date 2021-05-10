@@ -56,7 +56,7 @@ fn load_bpf(
     let (bpf_object, _bpf_fd) = libbpf::bpf_prog_load(bpf_program_path, libbpf::BpfProgType::XDP)?;
     let bpf_prog = libbpf::bpf_object__find_program_by_title(&bpf_object, progsec)?;
     let bpf_fd = libbpf::bpf_program__fd(&bpf_prog)?;
-    
+
     libbpf::bpf_set_link_xdp_fd(&interface, Some(&bpf_fd), xdp_flags)?;
     let info = libbpf::bpf_obj_get_info_by_fd(&bpf_fd)?;
     info!(
