@@ -85,7 +85,7 @@ This branch also can bypass the kernel network stack and pass raw frames directl
 
 1.  Under the `ebpf` folder, update `af_xdp_kern.c` to suit your needs.  Currently, it will redirect port 3000 as well as Convey ephemeral ports to userspace.  Anything else will be passed along to the kernel network stack.
 2.  Run `make` to compile your ebpf object.  Also, copy the output object (`af_xdp_kern.o`) someplace for running Convey. 
-3.  Update the optional section of the config file to set the name of the bpf program (`xdp_filter_3000` in this example), the xsks map name, and the path to the bpf program object file (created in step 2).  See `sample-passthrough.toml` for an example.
+3.  Update the optional section of the config file to set the name of the bpf program (`xdp_filter_80` in this example), the xsks map name, and the path to the bpf program object file (created in step 2).  See `sample-passthrough.toml` for an example.
 4.  Thats it! Run convey in passthrough mode as above.  It supports both DSR and passthrough.  See https://github.com/xdp-project/xdp-tutorial/tree/master/advanced03-AF_XDP for more background on AF_XDP.
 
 You may also need to manually remove the xdp program from your interface afterward; `sudo ip link set dev <interface> xdp off` 

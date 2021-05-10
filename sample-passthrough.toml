@@ -3,7 +3,7 @@ listen_addr = "192.168.1.148:80"
 backend = "tcp80_out"
   [frontends.tcp_80.xdp]
   bpf_program_path = "./af_xdp_kern.o"
-  progsec_name = "xdp_filter_3000"
+  progsec_name = "xdp_filter_80"
   xsks_map_name = "xsks_map"
 
 [backends.tcp80_out]

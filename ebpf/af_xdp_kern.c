@@ -19,7 +19,7 @@ struct bpf_map_def SEC("maps") xsks_map = {
 	.max_entries = 64,  /* Assume netdev has no more than 64 queues */
 };
 
-SEC("xdp_filter_3000")
+SEC("xdp_filter_80")
 int xdp_filter_prog(struct xdp_md *ctx)
 {
     int index = ctx->rx_queue_index;
@@ -38,7 +38,7 @@ int xdp_filter_prog(struct xdp_md *ctx)
 		    if (parse_tcphdr(&nh, data_end, &tcph) < 0) {
 			    return XDP_ABORTED;
             }
-            if (bpf_ntohs(tcph->dest)==3000 ) {
+            if (bpf_ntohs(tcph->dest)==80 ) {
                 /* A set entry here means that the correspnding queue_id
                 * has an active AF_XDP socket bound to it. */
                 if (bpf_map_lookup_elem(&xsks_map, &index))
