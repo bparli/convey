@@ -23,5 +23,5 @@ port = "7000"
 
 [passthrough]
 connection_tracker_capacity = 20000
-workers = 4
+workers = 2
 stats_update_frequency = 5

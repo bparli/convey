@@ -175,6 +175,7 @@ version = "0.4.0"
 dependencies = [
  "afxdp",
  "arraydeque",
+ "core_affinity",
  "crossbeam-channel",
  "docopt",
  "env_logger",
@@ -219,6 +220,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "716c271e8613ace48344f723b60b900a93150271e5be206212d052bbc0883efa"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "core_affinity"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8a03115cc34fb0d7c321dd154a3914b3ca082ccc5c11d91bf7117dbbe7171f"
+dependencies = [
+ "kernel32-sys",
+ "libc",
+ "num_cpus",
+ "winapi 0.2.8",
 ]
 
 [[package]]

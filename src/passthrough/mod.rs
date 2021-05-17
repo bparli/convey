@@ -96,19 +96,24 @@ impl Server {
             let thread_sender = sender.clone();
             if lb.xdp {
                 if let Some(xdp_conf) = &lb.xdp_config {
-                    match xdp::setup(
-                        lb.iface.clone(),
-                        lb.listen_ip,
+                    match xdp::setup_and_run(
+                        &mut lb.clone(),
                         &xdp_conf.bpf_program_path,
                         &xdp_conf.progsec_name,
                         &xdp_conf.xsks_map_name,
+                        thread_sender,
                     ) {
-                        Ok(mut xdp_prog) => {
-                            let _t = thread::spawn(move || {
-                                run_xdp(&mut xdp_prog, &mut srv_thread, thread_sender);
-                                run_xdp
+                        Ok(_) => {
+                            let stats_backend = lb.backend.clone();
+                            let listen_ip = lb.listen_ip.clone();
+                            let interval = Duration::from_secs(lb.backend.health_check_interval);
+                            let sender = sender.clone();
+                            thread::spawn(move || loop {
+                                health_checker(stats_backend.clone(), &sender, listen_ip);
+                                thread::sleep(interval);
                             });
                         }
+                        Ok(_) => {},
                         Err(e) => error!(
                             "Unable to setup XDP for loadbalancer {:?}: {:?}",
                             lb.name, e
@@ -327,20 +332,6 @@ pub fn run_server(lb: &mut LB, sender: Sender<StatsMssg>) {
         let interval = Duration::from_secs(lb.backend.health_check_interval);
         thread::sleep(interval);
     }
-}
-
-pub fn run_xdp(prog: &mut xdp::XDP, lb: &mut LB, stats_sender: Sender<StatsMssg>) {
-    // start health checks
-    let stats_backend = lb.backend.clone();
-    let listen_ip = lb.listen_ip.clone();
-    let interval = Duration::from_secs(lb.backend.health_check_interval);
-    let sender = stats_sender.clone();
-    thread::spawn(move || loop {
-        health_checker(stats_backend.clone(), &sender.clone(), listen_ip);
-        thread::sleep(interval);
-    });
-
-    prog.run(lb, stats_sender)
 }
 
 fn setup_interface_cfg() -> linux::Config {
