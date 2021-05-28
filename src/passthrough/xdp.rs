@@ -3,30 +3,32 @@ use rebpf::{error as rebpf_error, interface, libbpf};
 use std::cmp::min;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::mpsc;
-use std::sync::{Mutex, Arc, mpsc::Sender};
+use std::sync::{mpsc::Sender, Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
-use super::arp::{get_broadcast_addr, Arp};
+use super::arp::Arp;
 use super::lb::LB;
 use crate::stats::StatsMssg;
-use afxdp::{buf::Buf, buf_pool::BufPool};
-use afxdp::{buf_mmap::BufMmap, buf_pool_vec::BufPoolVec};
 use afxdp::mmap_area::{MmapArea, MmapAreaOptions};
 use afxdp::socket::{Socket, SocketOptions, SocketRx, SocketTx};
 use afxdp::umem::{Umem, UmemCompletionQueue, UmemFillQueue};
 use afxdp::PENDING_LEN;
+use afxdp::{buf::Buf, buf_pool::BufPool};
+use afxdp::{buf_mmap::BufMmap, buf_pool_vec::BufPoolVec};
 use libbpf_sys::{XSK_RING_CONS__DEFAULT_NUM_DESCS, XSK_RING_PROD__DEFAULT_NUM_DESCS};
-use pnet::datalink::NetworkInterface;
 use pnet::packet::ethernet::MutableEthernetPacket;
 use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{MutablePacket, Packet};
 use pnet::util::MacAddr;
 
+use lru_time_cache::LruCache;
+
 const BUF_NUM: usize = 65536;
 const BUF_LEN: usize = 4096;
 const BATCH_SIZE: usize = 64;
+const LOCAL_ARP_TTL: Duration = Duration::from_secs(300);
 
 struct XDPWorker<'a> {
     core: usize,
@@ -35,10 +37,12 @@ struct XDPWorker<'a> {
     tx: SocketTx<'a, BufCustom>,
     cq: UmemCompletionQueue<'a, BufCustom>,
     fq: UmemFillQueue<'a, BufCustom>,
-    
+
     buf_pool: Arc<Mutex<BufPoolVec<BufMmap<'a, BufCustom>, BufCustom>>>,
     lb: LB,
     arp_cache: Arp,
+    local_arp_cache: LruCache<Ipv4Addr, MacAddr>,
+    default_gw_mac: MacAddr,
 }
 
 #[derive(Default, Copy, Clone)]
@@ -117,9 +121,12 @@ pub fn setup_and_run(
     // Wrap the BufPool in an Arc and Mutex (to share between worker threads)
     let bp = Arc::new(Mutex::new(bp));
 
-    // setup and start global arp cache 
-    let arp_cache = Arp::new(lb.iface.clone(), lb.listen_ip).unwrap();
+    // setup and start global arp cache
+    let mut arp_cache = Arp::new(lb.iface.clone(), lb.listen_ip).unwrap();
     arp_cache.clone().start();
+
+    // should be populated by the time we get here
+    let default_gw_mac = arp_cache.get_default_mac().unwrap();
 
     // should be a worker per core and no more
     for worker in 0..lb.workers {
@@ -135,10 +142,10 @@ pub fn setup_and_run(
             Ok(umem) => umem,
             Err(err) => panic!("Unable to create umem for XDP load balancing: {:?}", err),
         };
-    
+
         let mut sock_opts = SocketOptions::default();
         sock_opts.copy_mode = true;
-    
+
         let r = Socket::new(
             umem1.clone(),
             lb.iface.name.as_str(),
@@ -150,8 +157,11 @@ pub fn setup_and_run(
         let (_skt1, skt1rx, skt1tx) = match r {
             Ok(skt) => skt,
             Err(err) => {
-                error!("Skipping Worker {:?}. Unable to create XSK for XDP load balancing: {:?}", worker, err);
-                continue
+                error!(
+                    "Skipping Worker {:?}. Unable to create XSK for XDP load balancing: {:?}",
+                    worker, err
+                );
+                continue;
             }
         };
 
@@ -166,6 +176,8 @@ pub fn setup_and_run(
             buf_pool: bp.clone(),
             lb: lb.clone(),
             arp_cache: arp_cache.clone(),
+            local_arp_cache: LruCache::<Ipv4Addr, MacAddr>::with_expiry_duration(LOCAL_ARP_TTL),
+            default_gw_mac,
         };
 
         // spawn worker (native) threads
@@ -235,7 +247,6 @@ impl XDPWorker<'_> {
             Err(err) => panic!("error: {:?}", err),
         }
 
-        let mut arp_cache = self.arp_cache.clone();
         debug!("Starting XDP Loop");
         loop {
             //
@@ -243,7 +254,7 @@ impl XDPWorker<'_> {
             //
             let r = self.cq.service(&mut bufs, BATCH_SIZE);
             match r {
-                Ok(n) => {}
+                Ok(_) => {}
                 Err(err) => panic!("error: {:?}", err),
             }
 
@@ -253,7 +264,7 @@ impl XDPWorker<'_> {
                 Ok(n) => {
                     if n > 0 {
                         debug!("XDP worker {:?} Received {:?} packets", self.core, n);
-                        let r = process_packets(&mut arp_cache, &mut self.lb, &mut v, &stats_sender);
+                        let r = self.process_packets(&mut v, &stats_sender);
                         match r {
                             Ok(_) => {}
                             Err(e) => error!("XDP: Problem processing packets: {:?}", e),
@@ -285,9 +296,7 @@ impl XDPWorker<'_> {
             // Fill buffers if required
             //
             if fq_deficit > 0 {
-                let r = self
-                    .fq
-                    .fill(&mut bufs, fq_deficit);
+                let r = self.fq.fill(&mut bufs, fq_deficit);
                 match r {
                     Ok(n) => {
                         fq_deficit -= n;
@@ -297,95 +306,101 @@ impl XDPWorker<'_> {
             }
         }
     }
-}
 
-fn process_packets(
-    arp_cache: &mut Arp,
-    lb: &mut LB,
-    bufs: &mut ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping>,
-    stats_sender: &Sender<StatsMssg>,
-) -> Result<(), ()> {
-    let mut stats = StatsMssg {
-        frontend: Some(lb.name.clone()),
-        backend: lb.backend.name.clone(),
-        connections: 0,
-        bytes_tx: 0,
-        bytes_rx: 0,
-        servers: None,
-    };
+    fn process_packets(
+        &mut self,
+        bufs: &mut ArrayDeque<[BufMmap<BufCustom>; PENDING_LEN], Wrapping>,
+        stats_sender: &Sender<StatsMssg>,
+    ) -> Result<(), ()> {
+        let mut stats = StatsMssg {
+            frontend: Some(self.lb.name.clone()),
+            backend: self.lb.backend.name.clone(),
+            connections: 0,
+            bytes_tx: 0,
+            bytes_rx: 0,
+            servers: None,
+        };
 
-    for buf in bufs {
-        let mut ethernet = MutableEthernetPacket::new(buf.get_data_mut()).unwrap();
+        for buf in bufs {
+            let mut ethernet = MutableEthernetPacket::new(buf.get_data_mut()).unwrap();
 
-        let mut ip_header = MutableIpv4Packet::new(ethernet.payload_mut()).unwrap();
-        match MutableTcpPacket::owned(ip_header.payload().to_owned()) {
-            Some(mut tcp_header) => {
-                if tcp_header.get_destination() == lb.listen_port {
-                    if let Some(processed_packet) =
-                        lb.client_handler(&mut ip_header, &mut tcp_header, true)
-                    {
-                        // set the appropriate ethernet destination on the mutated packet
-                        let target_mac: MacAddr;
-                        if let Some(mac_addr) = arp_cache
-                            .get_mac(processed_packet.ip_header.get_destination())
+            let mut ip_header = MutableIpv4Packet::new(ethernet.payload_mut()).unwrap();
+            match MutableTcpPacket::owned(ip_header.payload().to_owned()) {
+                Some(mut tcp_header) => {
+                    if tcp_header.get_destination() == self.lb.listen_port {
+                        if let Some(processed_packet) =
+                            self.lb
+                                .client_handler(&mut ip_header, &mut tcp_header, true)
                         {
-                            target_mac = mac_addr;
-                        } else {
-                            target_mac = get_broadcast_addr();
+                            // update stats
+                            stats.connections += &processed_packet.pkt_stats.connections;
+                            stats.bytes_rx += &processed_packet.pkt_stats.bytes_rx;
+                            stats.bytes_tx += &processed_packet.pkt_stats.bytes_tx;
+
+                            // set the appropriate ethernet destination on the mutated packet
+                            let ip = processed_packet.ip_header.get_destination();
+                            ethernet.set_destination(self.get_mac_addr(ip));
+                        };
+                    } else if !self.lb.dsr {
+                        // only handling server repsonses if not using dsr
+                        let guard = self.lb.port_mapper.read().unwrap();
+                        let client_addr = guard.get(&tcp_header.get_destination());
+                        match client_addr {
+                            Some(client_addr) => {
+                                // drop the lock!
+                                let cli_socket = &SocketAddr::new(client_addr.ip, client_addr.port);
+                                std::mem::drop(guard);
+                                // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
+                                if let Some(processed_packet) = self.lb.server_response_handler(
+                                    &mut ip_header,
+                                    &mut tcp_header,
+                                    cli_socket,
+                                    true,
+                                ) {
+                                    // update stats
+                                    stats.connections += &processed_packet.pkt_stats.connections;
+                                    stats.bytes_rx += &processed_packet.pkt_stats.bytes_rx;
+                                    stats.bytes_tx += &processed_packet.pkt_stats.bytes_tx;
+
+                                    // set the appropriate ethernet destination on the mutated packet
+                                    let ip = processed_packet.ip_header.get_destination();
+                                    ethernet.set_destination(self.get_mac_addr(ip));
+                                };
+                            }
+                            None => {}
                         }
-                        stats.connections += &processed_packet.pkt_stats.connections;
-                        stats.bytes_rx += &processed_packet.pkt_stats.bytes_rx;
-                        stats.bytes_tx += &processed_packet.pkt_stats.bytes_tx;
-
-                        ethernet.set_destination(target_mac);
-                        // update stats
-                    };
-                } else if !lb.dsr {
-                    // only handling server repsonses if not using dsr
-                    let guard = lb.port_mapper.read().unwrap();
-                    let client_addr = guard.get(&tcp_header.get_destination());
-                    match client_addr {
-                        Some(client_addr) => {
-                            // drop the lock!
-                            let cli_socket = &SocketAddr::new(client_addr.ip, client_addr.port);
-                            std::mem::drop(guard);
-                            // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
-                            if let Some(processed_packet) = lb.server_response_handler(
-                                &mut ip_header,
-                                &mut tcp_header,
-                                cli_socket,
-                                true,
-                            ) {
-                                // set the appropriate ethernet destination on the mutated packet
-                                let target_mac: MacAddr;
-                                if let Some(mac_addr) = arp_cache
-                                    .get_mac(processed_packet.ip_header.get_destination())
-                                {
-                                    target_mac = mac_addr;
-                                } else {
-                                    target_mac = get_broadcast_addr();
-                                }
-
-                                // update stats
-                                stats.connections += &processed_packet.pkt_stats.connections;
-                                stats.bytes_rx += &processed_packet.pkt_stats.bytes_rx;
-                                stats.bytes_tx += &processed_packet.pkt_stats.bytes_tx;
-
-                                ethernet.set_destination(target_mac);
-                            };
-                        }
-                        None => {}
                     }
                 }
+                None => {}
             }
-            None => {}
         }
+
+        // send the counters we've gathered for this bundle of packets
+        match stats_sender.send(stats) {
+            Ok(_) => {}
+            Err(e) => error!("Error sending stats message on channel: {}", e),
+        }
+        Ok(())
     }
 
-    // send the counters we've gathered for this bundle of packets
-    match stats_sender.send(stats) {
-        Ok(_) => {}
-        Err(e) => error!("Error sending stats message on channel: {}", e),
+    // if the target ip is not on this LAN return default GW mac address.
+    // if it is, try to get the mac addr from this core's/worker's local arp cache first
+    // then try global arp cache and update local cache if found
+    // otherwise fall back to sending to default GW
+    fn get_mac_addr(&mut self, ip: Ipv4Addr) -> MacAddr {
+        if self.arp_cache.get_network().contains(ip) {
+            if let Some(mac_addr) = self.local_arp_cache.get(&ip) {
+                return *mac_addr;
+            }
+            debug!("Local arp cache miss on IP {}", ip);
+            if let Some(mac_addr) = self.arp_cache.get_mac(ip) {
+                self.local_arp_cache.insert(ip, mac_addr);
+                return mac_addr;
+            } else {
+                return self.default_gw_mac;
+            }
+        } else {
+            return self.default_gw_mac;
+        }
     }
-    Ok(())
 }

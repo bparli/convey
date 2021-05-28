@@ -176,13 +176,12 @@ dependencies = [
  "afxdp",
  "arraydeque",
  "core_affinity",
- "crossbeam-channel",
  "docopt",
  "env_logger",
  "futures",
  "hash_ring",
+ "hex",
  "hyper 0.14.1",
- "ipnetwork 0.16.0",
  "iron",
  "libbpf-sys 0.3.0-1",
  "log 0.4.11",
@@ -232,27 +231,6 @@ dependencies = [
  "libc",
  "num_cpus",
  "winapi 0.2.8",
-]
-
-[[package]]
-name = "crossbeam-channel"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06ed27e177f16d65f0f0c22a213e17c696ace5dd64b14258b52f9417ccb52db4"
-dependencies = [
- "cfg-if 1.0.0",
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-utils"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4feb231f0d4d6af81aed15928e58ecf5816aa62a2393e2c82f46973e92a9a278"
-dependencies = [
- "autocfg",
- "cfg-if 1.0.0",
- "lazy_static",
 ]
 
 [[package]]
@@ -597,6 +575,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "http"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -796,15 +780,6 @@ name = "ipnet"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47be2f14c678be2fdcab04ab1171db51b2762ce6f0a8ee87c8dd4a04ed216135"
-
-[[package]]
-name = "ipnetwork"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8eca9f51da27bc908ef3dd85c21e1bbba794edaf94d7841e37356275b82d31e"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "ipnetwork"
@@ -1320,7 +1295,7 @@ version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b657d5b9a98a2c81b82549922b8b15984e49f8120cd130b11a09f81b9b55d633"
 dependencies = [
- "ipnetwork 0.17.0",
+ "ipnetwork",
  "pnet_base",
  "pnet_datalink",
  "pnet_packet",
@@ -1340,7 +1315,7 @@ version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59001c9c4d9d23bf2f61afaaf134a766fd6932ba2557c606b9112157053b9ac7"
 dependencies = [
- "ipnetwork 0.17.0",
+ "ipnetwork",
  "libc",
  "pnet_base",
  "pnet_sys",

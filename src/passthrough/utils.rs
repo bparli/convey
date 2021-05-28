@@ -5,8 +5,14 @@ use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{tcp, Packet};
+use pnet::util::MacAddr;
 use socket2::{Domain, SockAddr, Socket, Type};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{prelude::*, BufReader};
+use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 
 // health ports are reserved for health checks
 pub const HEALTH_PORT_LOWER: u16 = 32768;
@@ -104,4 +110,96 @@ pub fn find_interface(addr: Ipv4Addr) -> Option<NetworkInterface> {
         }
     }
     None
+}
+
+// read ARP table from linux filesystem
+// TODO - add tests
+pub fn fetch_arp_table() -> std::io::Result<HashMap<Ipv4Addr, MacAddr>> {
+    let file = File::open("/proc/net/arp")?;
+    let reader = BufReader::new(file);
+
+    let mut new_table = HashMap::new();
+
+    for (index, line) in reader.lines().enumerate() {
+        // skip header line
+        if index == 0 {
+            continue;
+        }
+        match line {
+            Ok(line) => {
+                let vals = line.split_whitespace().collect::<Vec<_>>();
+                match IpAddr::from_str(vals[0]) {
+                    Ok(ip) => match ip {
+                        IpAddr::V4(ipv4) => match MacAddr::from_str(vals[3]) {
+                            Ok(mac) => {
+                                new_table.insert(ipv4, mac);
+                            }
+                            Err(e) => error!("Unable to parse MAC Address from Arp Table: {}", e),
+                        },
+                        IpAddr::V6(_) => {}
+                    },
+                    Err(e) => error!("Unable to parse IP Address from Arp Table: {}", e),
+                }
+            }
+            Err(e) => error!("Unable to read line from Arp Table {}", e),
+        }
+    }
+    Ok(new_table)
+}
+
+// get default gateway from linux filesystem
+// TODO - add tests
+pub fn get_default_gw(interface: String) -> std::result::Result<Ipv4Addr, std::io::Error> {
+    let file = File::open("/proc/net/route")?;
+    let reader = BufReader::new(file);
+
+    for (index, line) in reader.lines().enumerate() {
+        //skip header line
+        if index == 0 {
+            continue;
+        }
+        match line {
+            Ok(line) => {
+                let vals = line.split_whitespace().collect::<Vec<_>>();
+                if let Ok(dst) = vals[1].parse::<i64>() {
+                    // check for out interface and the default route
+                    if vals[0] == interface && dst == 0 {
+                        match hex::decode(vals[2]) {
+                            Ok(decoded) => {
+                                return Ok(Ipv4Addr::new(
+                                    decoded[3], decoded[2], decoded[1], decoded[0],
+                                ))
+                            }
+                            Err(e) => {
+                                return Err(Error::new(
+                                    ErrorKind::Other,
+                                    "Decoding default gateway IP error: ".to_owned()
+                                        + &e.to_string(),
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => println!("Unable to read line from Routes file {}", e),
+        }
+    }
+    Err(Error::new(
+        ErrorKind::Other,
+        "Unable to learn default Gateway from /proc/net/route.  Interface:".to_owned() + &interface,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use self::passthrough::fetch_arp_table;
+    use crate::passthrough;
+
+    #[test]
+    fn test_fetch_arp_table() {
+        match fetch_arp_table() {
+            Ok(m) => assert!(m.len() > 0),
+            Err(_) => assert!(false),
+        }
+    }
 }

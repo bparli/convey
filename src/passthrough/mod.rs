@@ -4,7 +4,7 @@ extern crate pnet_macros_support;
 
 use self::backend::{health_checker, ServerPool};
 use self::lb::LB;
-use self::utils::find_interface;
+use self::utils::{fetch_arp_table, find_interface, get_default_gw};
 
 use crate::config::{BaseConfig, Config};
 use crate::stats::StatsMssg;
@@ -113,7 +113,7 @@ impl Server {
                                 thread::sleep(interval);
                             });
                         }
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(e) => error!(
                             "Unable to setup XDP for loadbalancer {:?}: {:?}",
                             lb.name, e
