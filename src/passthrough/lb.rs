@@ -13,7 +13,7 @@ use pnet::datalink::NetworkInterface;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::{checksum, MutableIpv4Packet};
 use pnet::packet::tcp::{MutableTcpPacket, TcpPacket};
-use pnet::packet::{MutablePacket, Packet, tcp};
+use pnet::packet::{tcp, MutablePacket, Packet};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -253,8 +253,7 @@ impl LB {
                     }
                 }
 
-                ip_header
-                    .set_total_length(tcp_len as u16 + IPV4_HEADER_LEN as u16);
+                ip_header.set_total_length(tcp_len as u16 + IPV4_HEADER_LEN as u16);
                 ip_header.set_version(4);
                 ip_header.set_ttl(225);
                 ip_header.set_next_level_protocol(IpNextHeaderProtocols::Tcp);
@@ -286,7 +285,6 @@ impl LB {
         ip_header: &'a mut MutableIpv4Packet<'a>,
         xdp: bool,
     ) -> Option<Processed<'a>> {
-
         // setup stats update return
         let mut mssg = StatsMssg {
             frontend: None,
@@ -297,7 +295,6 @@ impl LB {
             servers: None,
         };
 
-        
         ip_header.set_version(4);
         ip_header.set_ttl(225);
         ip_header.set_next_level_protocol(IpNextHeaderProtocols::Tcp);
@@ -326,7 +323,8 @@ impl LB {
                 IpAddr::V4(fwd_ipv4) => {
                     if self.backend.get_server_health(&conn.backend_srv) {
                         {
-                            let mut tcp_header = MutableTcpPacket::new(ip_header.payload_mut()).unwrap();
+                            let mut tcp_header =
+                                MutableTcpPacket::new(ip_header.payload_mut()).unwrap();
                             tcp_header.set_destination(conn.backend_srv.port);
 
                             tcp_len = tcp_header.packet().len();
@@ -349,7 +347,7 @@ impl LB {
                             mssg.bytes_tx = tcp_header.payload().len() as u64;
                         }
 
-                        ip_header.set_total_length( tcp_len as u16 + IPV4_HEADER_LEN as u16);
+                        ip_header.set_total_length(tcp_len as u16 + IPV4_HEADER_LEN as u16);
 
                         ip_header.set_destination(fwd_ipv4);
 
@@ -391,12 +389,13 @@ impl LB {
             match node.host {
                 IpAddr::V4(fwd_ipv4) => {
                     {
-                        let mut tcp_header = MutableTcpPacket::new(ip_header.payload_mut()).unwrap();
+                        let mut tcp_header =
+                            MutableTcpPacket::new(ip_header.payload_mut()).unwrap();
 
                         tcp_header.set_destination(node.port);
 
                         // leave original tcp source if dsr
-                       
+
                         if !self.dsr {
                             // set ephemeral port for tracking connections and in case of mutiple clients using same port
                             ephem_port = self.next_avail_port();
@@ -459,7 +458,7 @@ impl LB {
         } else {
             error!("Unable to find backend");
             // Send RST to client
-            
+
             {
                 let mut tcp_header = MutableTcpPacket::new(ip_header.payload_mut()).unwrap();
                 tcp_len = tcp_header.packet().len();
@@ -591,9 +590,7 @@ mod tests {
         let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
 
         // call client_handler and verify packet being sent out to healthy backend server
-        let processed_packet = test_lb
-            .client_handler(&mut req_header, false)
-            .unwrap();
+        let processed_packet = test_lb.client_handler(&mut req_header, false).unwrap();
         assert_eq!(processed_packet.ip_header.get_destination(), backend_srv_ip);
         assert_eq!(processed_packet.ip_header.get_source(), lb_ip);
 
@@ -633,9 +630,7 @@ mod tests {
             // check same client again to verify connection tracker is used
             // but need new request header
             let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
-            let processed_packet = test_lb
-                .client_handler(&mut req_header, false)
-                .unwrap();
+            let processed_packet = test_lb.client_handler(&mut req_header, false).unwrap();
             // next port should not have incremented
 
             assert_eq!(test_lb.conn_tracker.read().unwrap().len(), 1);

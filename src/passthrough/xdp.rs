@@ -17,12 +17,12 @@ use afxdp::PENDING_LEN;
 use afxdp::{buf::Buf, buf_pool::BufPool};
 use afxdp::{buf_mmap::BufMmap, buf_pool_vec::BufPoolVec};
 use libbpf_sys::{XSK_RING_CONS__DEFAULT_NUM_DESCS, XSK_RING_PROD__DEFAULT_NUM_DESCS};
+use pnet::packet::ethernet::EtherTypes;
 use pnet::packet::ethernet::MutableEthernetPacket;
 use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{MutablePacket, Packet};
 use pnet::util::MacAddr;
-use pnet::packet::ethernet::EtherTypes;
 
 use lru_time_cache::LruCache;
 
@@ -329,9 +329,7 @@ impl XDPWorker<'_> {
             match MutableTcpPacket::new(ip_header.payload_mut()) {
                 Some(tcp_header) => {
                     if tcp_header.get_destination() == self.lb.listen_port {
-                        if let Some(processed_packet) =
-                            self.lb
-                                .client_handler(&mut ip_header, true)
+                        if let Some(processed_packet) = self.lb.client_handler(&mut ip_header, true)
                         {
                             // update stats
                             stats.connections += &processed_packet.pkt_stats.connections;

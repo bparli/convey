@@ -186,10 +186,9 @@ fn process_packets(
                                     match TcpPacket::new(ip_header.payload()) {
                                         Some(mut tcp_header) => {
                                             if tcp_header.get_destination() == lb.listen_port {
-                                                if let Some(processed_packet) = lb.client_handler(
-                                                    &mut ip_header,
-                                                    false,
-                                                ) {
+                                                if let Some(processed_packet) =
+                                                    lb.client_handler(&mut ip_header, false)
+                                                {
                                                     // send out the mutated packet
                                                     match ipv4_tx.send_to(
                                                         processed_packet.ip_header.to_immutable(),
