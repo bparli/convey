@@ -410,6 +410,13 @@ impl LB {
                                 &self.listen_ip,
                                 &fwd_ipv4,
                             ));
+                            self.port_mapper.write().unwrap().insert(
+                                ephem_port,
+                                Client {
+                                    ip: IpAddr::V4(keep_client_ip),
+                                    port: client_port,
+                                },
+                            );
                         } else {
                             tcp_header.set_checksum(tcp::ipv4_checksum(
                                 &tcp_header.to_immutable(),
@@ -439,15 +446,7 @@ impl LB {
                     {
                         self.conn_tracker.write().unwrap().insert(cli, conn);
                     }
-                    {
-                        self.port_mapper.write().unwrap().insert(
-                            ephem_port,
-                            Client {
-                                ip: IpAddr::V4(keep_client_ip),
-                                port: client_port,
-                            },
-                        );
-                    }
+
                     Some(Processed {
                         pkt_stats: mssg,
                         ip_header,
