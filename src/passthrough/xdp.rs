@@ -22,6 +22,7 @@ use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{MutablePacket, Packet};
 use pnet::util::MacAddr;
+use pnet::packet::ethernet::EtherTypes;
 
 use lru_time_cache::LruCache;
 
@@ -325,12 +326,12 @@ impl XDPWorker<'_> {
             let mut ethernet = MutableEthernetPacket::new(buf.get_data_mut()).unwrap();
 
             let mut ip_header = MutableIpv4Packet::new(ethernet.payload_mut()).unwrap();
-            match MutableTcpPacket::owned(ip_header.payload().to_owned()) {
-                Some(mut tcp_header) => {
+            match MutableTcpPacket::new(ip_header.payload_mut()) {
+                Some(tcp_header) => {
                     if tcp_header.get_destination() == self.lb.listen_port {
                         if let Some(processed_packet) =
                             self.lb
-                                .client_handler(&mut ip_header, &mut tcp_header, true)
+                                .client_handler(&mut ip_header, true)
                         {
                             // update stats
                             stats.connections += &processed_packet.pkt_stats.connections;
@@ -340,6 +341,8 @@ impl XDPWorker<'_> {
                             // set the appropriate ethernet destination on the mutated packet
                             let ip = processed_packet.ip_header.get_destination();
                             ethernet.set_destination(self.get_mac_addr(ip));
+                            ethernet.set_source(self.arp_cache.local_mac);
+                            ethernet.set_ethertype(EtherTypes::Ipv4);
                         };
                     } else if !self.lb.dsr {
                         // only handling server repsonses if not using dsr
@@ -353,7 +356,6 @@ impl XDPWorker<'_> {
                                 // if true the client socketaddr is in portmapper and the connection/response from backend server is relevant
                                 if let Some(processed_packet) = self.lb.server_response_handler(
                                     &mut ip_header,
-                                    &mut tcp_header,
                                     cli_socket,
                                     true,
                                 ) {
@@ -365,6 +367,8 @@ impl XDPWorker<'_> {
                                     // set the appropriate ethernet destination on the mutated packet
                                     let ip = processed_packet.ip_header.get_destination();
                                     ethernet.set_destination(self.get_mac_addr(ip));
+                                    ethernet.set_source(self.arp_cache.local_mac);
+                                    ethernet.set_ethertype(EtherTypes::Ipv4);
                                 };
                             }
                             None => {}

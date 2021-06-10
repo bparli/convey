@@ -13,7 +13,7 @@ use pnet::datalink::{linux, FanoutOption, FanoutType, NetworkInterface};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::MutableIpv4Packet;
-use pnet::packet::tcp::MutableTcpPacket;
+use pnet::packet::tcp::TcpPacket;
 use pnet::packet::Packet;
 use pnet::transport::transport_channel;
 use pnet::transport::TransportChannelType::Layer3;
@@ -183,12 +183,11 @@ fn process_packets(
                             Some(mut ip_header) => {
                                 let dst = ip_header.get_destination();
                                 if dst == lb.listen_ip {
-                                    match MutableTcpPacket::owned(ip_header.payload().to_owned()) {
+                                    match TcpPacket::new(ip_header.payload()) {
                                         Some(mut tcp_header) => {
                                             if tcp_header.get_destination() == lb.listen_port {
                                                 if let Some(processed_packet) = lb.client_handler(
                                                     &mut ip_header,
-                                                    &mut tcp_header,
                                                     false,
                                                 ) {
                                                     // send out the mutated packet
@@ -228,7 +227,6 @@ fn process_packets(
                                                         if let Some(processed_packet) = lb
                                                             .server_response_handler(
                                                                 &mut ip_header,
-                                                                &mut tcp_header,
                                                                 cli_socket,
                                                                 false,
                                                             )
@@ -446,8 +444,7 @@ mod tests {
 
         for i in 0..5 {
             let mut ip_header = build_dummy_ip(dummy_ip, dummy_ip, 35000 + i, 3000);
-            let mut tcp_header = MutableTcpPacket::owned(ip_header.payload().to_owned()).unwrap();
-            lb.client_handler(&mut ip_header, &mut tcp_header, false);
+            lb.client_handler(&mut ip_header, false);
         }
 
         assert_eq!(lb.conn_tracker.read().unwrap().len(), 2);

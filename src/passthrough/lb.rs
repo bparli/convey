@@ -12,8 +12,8 @@ use lru_time_cache::LruCache;
 use pnet::datalink::NetworkInterface;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::{checksum, MutableIpv4Packet};
-use pnet::packet::tcp::MutableTcpPacket;
-use pnet::packet::{tcp, Packet};
+use pnet::packet::tcp::{MutableTcpPacket, TcpPacket};
+use pnet::packet::{MutablePacket, Packet, tcp};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -216,10 +216,12 @@ impl LB {
     pub fn server_response_handler<'a>(
         &mut self,
         ip_header: &'a mut MutableIpv4Packet<'a>,
-        tcp_header: &mut MutableTcpPacket,
         client_addr: &SocketAddr,
         xdp: bool,
     ) -> Option<Processed<'a>> {
+        let ip_header_src = ip_header.get_source();
+        let mut tcp_len = 0;
+
         match client_addr.ip() {
             IpAddr::V4(client_ipv4) => {
                 let mut mssg = StatsMssg {
@@ -231,20 +233,31 @@ impl LB {
                     servers: None,
                 };
 
-                tcp_header.set_destination(client_addr.port());
-                tcp_header.set_source(self.listen_port);
-                tcp_header.set_checksum(tcp::ipv4_checksum(
-                    &tcp_header.to_immutable(),
-                    &self.listen_ip,
-                    &client_ipv4,
-                ));
+                {
+                    let mut tcp_header = MutableTcpPacket::new(ip_header.payload_mut()).unwrap();
+                    tcp_len = tcp_header.packet().len();
+
+                    tcp_header.set_destination(client_addr.port());
+                    tcp_header.set_source(self.listen_port);
+                    tcp_header.set_checksum(tcp::ipv4_checksum(
+                        &tcp_header.to_immutable(),
+                        &self.listen_ip,
+                        &client_ipv4,
+                    ));
+
+                    mssg.bytes_tx = tcp_header.payload().len() as u64;
+                    match tcp_header.get_flags() {
+                        0b0_0001_0010 => mssg.connections = 1, // add a connection to count on SYN,ACK
+                        0b0_0001_0001 => mssg.connections = -1, // sub a connection to count on FIN,ACK
+                        _ => {}
+                    }
+                }
 
                 ip_header
-                    .set_total_length(tcp_header.packet().len() as u16 + IPV4_HEADER_LEN as u16);
+                    .set_total_length(tcp_len as u16 + IPV4_HEADER_LEN as u16);
                 ip_header.set_version(4);
                 ip_header.set_ttl(225);
                 ip_header.set_next_level_protocol(IpNextHeaderProtocols::Tcp);
-                ip_header.set_payload(&tcp_header.packet());
                 ip_header.set_destination(client_ipv4);
                 ip_header.set_source(self.listen_ip);
                 ip_header.set_header_length(5);
@@ -255,14 +268,6 @@ impl LB {
                     // since we'll be sending out with IP_HDRINCL set on raw socket the kernel
                     // will perform the checksum calculation on ip header anyway.  no need to do it twice
                     ip_header.set_checksum(0);
-                }
-
-                mssg.bytes_tx = tcp_header.payload().len() as u64;
-
-                match tcp_header.get_flags() {
-                    0b0_0001_0010 => mssg.connections = 1, // add a connection to count on SYN,ACK
-                    0b0_0001_0001 => mssg.connections = -1, // sub a connection to count on FIN,ACK
-                    _ => {}
                 }
 
                 return Some(Processed {
@@ -279,10 +284,8 @@ impl LB {
     pub fn client_handler<'a>(
         &mut self,
         ip_header: &'a mut MutableIpv4Packet<'a>,
-        tcp_header: &mut MutableTcpPacket,
         xdp: bool,
     ) -> Option<Processed<'a>> {
-        let client_port = tcp_header.get_source();
 
         // setup stats update return
         let mut mssg = StatsMssg {
@@ -294,7 +297,7 @@ impl LB {
             servers: None,
         };
 
-        ip_header.set_total_length(tcp_header.packet().len() as u16 + IPV4_HEADER_LEN as u16);
+        
         ip_header.set_version(4);
         ip_header.set_ttl(225);
         ip_header.set_next_level_protocol(IpNextHeaderProtocols::Tcp);
@@ -304,35 +307,50 @@ impl LB {
         ip_header.set_source(new_source_ip);
 
         //check if we are already tracking this connection
+        let mut client_port = 0;
+        {
+            let tcp_read_header = TcpPacket::new(ip_header.payload()).unwrap();
+            client_port = tcp_read_header.get_source();
+        }
         let cli = Client {
             ip: IpAddr::V4(keep_client_ip),
             port: client_port,
         };
+
+        let ip_header_src = ip_header.get_source();
+        let mut tcp_len = 0;
 
         if let Some(conn) = self.cli_connection(&cli) {
             debug!("Found existing connection {:?}", conn);
             match conn.backend_srv.host {
                 IpAddr::V4(fwd_ipv4) => {
                     if self.backend.get_server_health(&conn.backend_srv) {
-                        tcp_header.set_destination(conn.backend_srv.port);
+                        {
+                            let mut tcp_header = MutableTcpPacket::new(ip_header.payload_mut()).unwrap();
+                            tcp_header.set_destination(conn.backend_srv.port);
 
-                        // leave original tcp source if dsr
-                        if !self.dsr {
-                            tcp_header.set_source(conn.ephem_port);
-                            tcp_header.set_checksum(tcp::ipv4_checksum(
-                                &tcp_header.to_immutable(),
-                                &self.listen_ip,
-                                &fwd_ipv4,
-                            ));
-                        } else {
-                            tcp_header.set_checksum(tcp::ipv4_checksum(
-                                &tcp_header.to_immutable(),
-                                &ip_header.get_source(),
-                                &fwd_ipv4,
-                            ));
+                            tcp_len = tcp_header.packet().len();
+
+                            // leave original tcp source if dsr
+                            if !self.dsr {
+                                tcp_header.set_source(conn.ephem_port);
+                                tcp_header.set_checksum(tcp::ipv4_checksum(
+                                    &tcp_header.to_immutable(),
+                                    &self.listen_ip,
+                                    &fwd_ipv4,
+                                ));
+                            } else {
+                                tcp_header.set_checksum(tcp::ipv4_checksum(
+                                    &tcp_header.to_immutable(),
+                                    &ip_header_src,
+                                    &fwd_ipv4,
+                                ));
+                            }
+                            mssg.bytes_tx = tcp_header.payload().len() as u64;
                         }
 
-                        ip_header.set_payload(&tcp_header.packet());
+                        ip_header.set_total_length( tcp_len as u16 + IPV4_HEADER_LEN as u16);
+
                         ip_header.set_destination(fwd_ipv4);
 
                         if xdp {
@@ -342,8 +360,6 @@ impl LB {
                             // will perform the checksum calculation on ip header anyway.  no need to do it twice
                             ip_header.set_checksum(0);
                         }
-
-                        mssg.bytes_tx = tcp_header.payload().len() as u64;
 
                         return Some(Processed {
                             pkt_stats: mssg,
@@ -369,37 +385,42 @@ impl LB {
             IpAddr::V4(self.listen_ip),
             self.listen_port,
             IpAddr::V4(keep_client_ip),
-            tcp_header.get_source(),
+            client_port,
         ) {
+            let mut ephem_port = 0 as u16;
             match node.host {
                 IpAddr::V4(fwd_ipv4) => {
-                    tcp_header.set_destination(node.port);
+                    {
+                        let mut tcp_header = MutableTcpPacket::new(ip_header.payload_mut()).unwrap();
 
-                    // leave original tcp source if dsr
-                    let mut ephem_port = 0 as u16;
-                    if !self.dsr {
-                        // set ephemeral port for tracking connections and in case of mutiple clients using same port
-                        ephem_port = self.next_avail_port();
-                        debug!(
-                            "Using Ephemeral port {} for client connection {:?}",
-                            ephem_port,
-                            SocketAddr::new(IpAddr::V4(keep_client_ip), client_port)
-                        );
-                        tcp_header.set_source(ephem_port);
-                        tcp_header.set_checksum(tcp::ipv4_checksum(
-                            &tcp_header.to_immutable(),
-                            &self.listen_ip,
-                            &fwd_ipv4,
-                        ));
-                    } else {
-                        tcp_header.set_checksum(tcp::ipv4_checksum(
-                            &tcp_header.to_immutable(),
-                            &ip_header.get_source(),
-                            &fwd_ipv4,
-                        ));
+                        tcp_header.set_destination(node.port);
+
+                        // leave original tcp source if dsr
+                       
+                        if !self.dsr {
+                            // set ephemeral port for tracking connections and in case of mutiple clients using same port
+                            ephem_port = self.next_avail_port();
+                            debug!(
+                                "Using Ephemeral port {} for client connection {:?}",
+                                ephem_port,
+                                SocketAddr::new(IpAddr::V4(keep_client_ip), client_port)
+                            );
+                            tcp_header.set_source(ephem_port);
+                            tcp_header.set_checksum(tcp::ipv4_checksum(
+                                &tcp_header.to_immutable(),
+                                &self.listen_ip,
+                                &fwd_ipv4,
+                            ));
+                        } else {
+                            tcp_header.set_checksum(tcp::ipv4_checksum(
+                                &tcp_header.to_immutable(),
+                                &ip_header_src,
+                                &fwd_ipv4,
+                            ));
+                        }
+                        mssg.bytes_tx = tcp_header.payload().len() as u64;
                     }
 
-                    ip_header.set_payload(&tcp_header.packet());
                     ip_header.set_destination(fwd_ipv4);
 
                     if xdp {
@@ -409,8 +430,6 @@ impl LB {
                         // will perform the checksum calculation on ip header anyway.  no need to do it twice
                         ip_header.set_checksum(0);
                     }
-
-                    mssg.bytes_tx = tcp_header.payload().len() as u64;
 
                     // not already tracking the connection so insert into our maps
                     let conn = Connection {
@@ -440,25 +459,30 @@ impl LB {
         } else {
             error!("Unable to find backend");
             // Send RST to client
-            tcp_header.set_source(self.listen_port);
-            tcp_header.set_destination(tcp_header.get_source());
-            if tcp_header.get_flags() == tcp::TcpFlags::SYN {
-                // reply ACK, RST
-                tcp_header.set_flags(0b0_0001_0100);
-            } else {
-                tcp_header.set_flags(tcp::TcpFlags::RST);
-            }
-            tcp_header.set_acknowledgement(tcp_header.get_sequence().clone() + 1);
-            tcp_header.set_sequence(0);
-            tcp_header.set_window(0);
-            tcp_header.set_checksum(tcp::ipv4_checksum(
-                &tcp_header.to_immutable(),
-                &self.listen_ip,
-                &keep_client_ip,
-            ));
+            
+            {
+                let mut tcp_header = MutableTcpPacket::new(ip_header.payload_mut()).unwrap();
+                tcp_len = tcp_header.packet().len();
 
-            ip_header.set_payload(&tcp_header.packet());
-            ip_header.set_total_length(tcp_header.packet().len() as u16 + IPV4_HEADER_LEN as u16);
+                tcp_header.set_source(self.listen_port);
+                tcp_header.set_destination(tcp_header.get_source());
+                if tcp_header.get_flags() == tcp::TcpFlags::SYN {
+                    // reply ACK, RST
+                    tcp_header.set_flags(0b0_0001_0100);
+                } else {
+                    tcp_header.set_flags(tcp::TcpFlags::RST);
+                }
+                tcp_header.set_acknowledgement(tcp_header.get_sequence().clone() + 1);
+                tcp_header.set_sequence(0);
+                tcp_header.set_window(0);
+                tcp_header.set_checksum(tcp::ipv4_checksum(
+                    &tcp_header.to_immutable(),
+                    &self.listen_ip,
+                    &keep_client_ip,
+                ));
+            }
+
+            ip_header.set_total_length(tcp_len as u16 + IPV4_HEADER_LEN as u16);
             ip_header.set_destination(keep_client_ip);
 
             if xdp {
@@ -565,11 +589,10 @@ mod tests {
 
         // gen test ip/tcp packet with simulated client
         let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
-        let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
 
         // call client_handler and verify packet being sent out to healthy backend server
         let processed_packet = test_lb
-            .client_handler(&mut req_header, &mut tcp_header, false)
+            .client_handler(&mut req_header, false)
             .unwrap();
         assert_eq!(processed_packet.ip_header.get_destination(), backend_srv_ip);
         assert_eq!(processed_packet.ip_header.get_source(), lb_ip);
@@ -610,9 +633,8 @@ mod tests {
             // check same client again to verify connection tracker is used
             // but need new request header
             let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
-            let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
             let processed_packet = test_lb
-                .client_handler(&mut req_header, &mut tcp_header, false)
+                .client_handler(&mut req_header, false)
                 .unwrap();
             // next port should not have incremented
 
@@ -648,8 +670,7 @@ mod tests {
         // check same client again to verify connection is failed
         // but need new request header
         let mut req_header = build_dummy_ip(client_ip, lb_ip, 43000, 3000);
-        let mut tcp_header = MutableTcpPacket::owned(req_header.payload().to_owned()).unwrap();
-        test_lb.client_handler(&mut req_header, &mut tcp_header, false);
+        test_lb.client_handler(&mut req_header, false);
         // since there are not healthy backend servers there should be no connections added to map
         assert_eq!(test_lb.conn_tracker.read().unwrap().len(), 0);
     }
@@ -669,12 +690,10 @@ mod tests {
 
         // simulate response from server at port 80 to local (ephemeral) port 35000
         let mut resp_header = build_dummy_ip(backend_srv_ip, lb_ip, 80, 35000);
-        let mut tcp_header = MutableTcpPacket::owned(resp_header.payload().to_owned()).unwrap();
         // server should respond to client ip at client's port
         let srv_resp = lb
             .server_response_handler(
                 &mut resp_header,
-                &mut tcp_header,
                 &SocketAddr::new(IpAddr::V4(client_ip), 55000),
                 false,
             )
