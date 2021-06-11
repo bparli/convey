@@ -8,6 +8,9 @@ edition = "2018"
 hyper = { version = "0.14", features = ["full"] }
 reqwest = { version = "0.10", features = ["blocking", "json"] }
 
+[profile.release]
+debug = true
+
 [dependencies]
 docopt = "1.1"
 log = "0.4"

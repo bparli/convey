@@ -23,8 +23,7 @@ use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::tcp::MutableTcpPacket;
 use pnet::packet::{MutablePacket, Packet};
 use pnet::util::MacAddr;
-
-use lru_time_cache::LruCache;
+use std::collections::HashMap;
 
 const BUF_NUM: usize = 65536;
 const BUF_LEN: usize = 4096;
@@ -42,7 +41,7 @@ struct XDPWorker<'a> {
     buf_pool: Arc<Mutex<BufPoolVec<BufMmap<'a, BufCustom>, BufCustom>>>,
     lb: LB,
     arp_cache: Arp,
-    local_arp_cache: LruCache<Ipv4Addr, MacAddr>,
+    local_arp_cache: HashMap<Ipv4Addr, MacAddr>,
     default_gw_mac: MacAddr,
 }
 
@@ -177,7 +176,7 @@ pub fn setup_and_run(
             buf_pool: bp.clone(),
             lb: lb.clone(),
             arp_cache: arp_cache.clone(),
-            local_arp_cache: LruCache::<Ipv4Addr, MacAddr>::with_expiry_duration(LOCAL_ARP_TTL),
+            local_arp_cache: HashMap::new(),
             default_gw_mac,
         };
 
@@ -399,6 +398,7 @@ impl XDPWorker<'_> {
                 self.local_arp_cache.insert(ip, mac_addr);
                 return mac_addr;
             } else {
+                warn!("Unable to learn MAC for {}.  Default to gateway", ip);
                 return self.default_gw_mac;
             }
         } else {
