@@ -1,5 +1,5 @@
 # Convey
-Layer 4 load balancer with dynamic configuration loading featuring proxy, passthrough and disrect server return modes
+Layer 4 load balancer with dynamic configuration loading featuring proxy, passthrough and direct server return modes
 
 ## Features
 - Stats page (at /stats) with basic connection/bytes counters and backend server pool statuses
