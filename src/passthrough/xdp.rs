@@ -338,8 +338,10 @@ impl XDPWorker<'_> {
                             // set the appropriate ethernet destination on the mutated packet
                             let ip = processed_packet.ip_header.get_destination();
                             ethernet.set_destination(self.get_mac_addr(ip));
-                            ethernet.set_source(self.arp_cache.local_mac);
                             ethernet.set_ethertype(EtherTypes::Ipv4);
+                            if !self.lb.dsr {
+                                ethernet.set_source(self.arp_cache.local_mac);
+                            }
                         };
                     } else if !self.lb.dsr {
                         // only handling server repsonses if not using dsr
@@ -364,8 +366,10 @@ impl XDPWorker<'_> {
                                     // set the appropriate ethernet destination on the mutated packet
                                     let ip = processed_packet.ip_header.get_destination();
                                     ethernet.set_destination(self.get_mac_addr(ip));
-                                    ethernet.set_source(self.arp_cache.local_mac);
                                     ethernet.set_ethertype(EtherTypes::Ipv4);
+                                    if !self.lb.dsr {
+                                        ethernet.set_source(self.arp_cache.local_mac);
+                                    }
                                 };
                             }
                             None => {}
