@@ -96,6 +96,9 @@ The easiest way to run tests is to run them as superuser.  This is because some 
 sudo ~/.cargo/bin/cargo test
 ```
 
+## AF_XDP
+The `feature/xdp` branch is a WIP using AF_XDP to loadbalance in passthrough and DSR modes.  For now it will be maintained in a separate branch since it requires kernel versions 5.4 or greater.
+
 ## Build
 ```cargo build --release```
 
